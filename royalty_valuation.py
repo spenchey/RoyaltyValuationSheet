@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Music Royalty Valuation Tool
+Music Royalty Valuation Tool - Desktop Version with AI-Powered Analysis
 Double-click to run, select your earnings CSV, get a complete valuation spreadsheet.
 """
 
@@ -13,8 +13,22 @@ from openpyxl.utils import get_column_letter
 from datetime import datetime
 import os
 import sys
+import re
 
-def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_minus_1, ytd, base_year, output_path):
+# Try to import AI analysis module
+try:
+    from ai_analysis import (
+        run_full_analysis,
+        GENRE_DECAY_BENCHMARKS,
+        AIAnalysisResult
+    )
+    AI_AVAILABLE = True
+except ImportError:
+    AI_AVAILABLE = False
+
+
+def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_minus_1, ytd, base_year,
+                              output_path, ai_analysis=None, yearly_data=None):
     """Creates the complete valuation template with data populated."""
 
     wb = Workbook()
@@ -30,6 +44,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     scenario_base_fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
     scenario_bull_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
     weighted_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    ai_fill = PatternFill(start_color="E8DAEF", end_color="E8DAEF", fill_type="solid")
 
     # ============================================================================
     # TITLE
@@ -95,10 +110,16 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['C13'].font = edit_font
 
     # ============================================================================
-    # KEY ASSUMPTIONS
+    # KEY ASSUMPTIONS - With AI suggestions if available
     # ============================================================================
     ws['A15'] = "KEY ASSUMPTIONS"
     ws['A15'].font = section_font
+
+    if ai_analysis:
+        ws['D15'] = "AI SUGGESTED"
+        ws['D15'].font = Font(bold=True, size=11, color="7B68EE")
+        ws['E15'] = "Confidence"
+        ws['E15'].font = Font(bold=True, size=11, color="7B68EE")
 
     ws['A16'] = "Growth Rate (Years 1-3)"
     ws['B16'] = 0.05
@@ -107,12 +128,24 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['C16'] = "<- Edit"
     ws['C16'].font = edit_font
 
+    if ai_analysis:
+        ws['D16'] = ai_analysis.suggested_growth_rate
+        ws['D16'].fill = ai_fill
+        ws['D16'].number_format = '0.0%'
+        ws['E16'] = f"{ai_analysis.confidence_score:.0%}"
+        ws['E16'].fill = ai_fill
+
     ws['A17'] = "Growth Rate (Years 4-5)"
     ws['B17'] = 0.03
     ws['B17'].fill = input_fill
     ws['B17'].number_format = '0.0%'
     ws['C17'] = "<- Edit"
     ws['C17'].font = edit_font
+
+    if ai_analysis:
+        ws['D17'] = ai_analysis.suggested_growth_rate * 0.6
+        ws['D17'].fill = ai_fill
+        ws['D17'].number_format = '0.0%'
 
     ws['A18'] = "Discount Rate"
     ws['B18'] = 0.12
@@ -121,12 +154,22 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['C18'] = "<- Edit"
     ws['C18'].font = edit_font
 
+    if ai_analysis:
+        ws['D18'] = ai_analysis.suggested_discount_rate
+        ws['D18'].fill = ai_fill
+        ws['D18'].number_format = '0.0%'
+
     ws['A19'] = "Terminal Growth Rate"
     ws['B19'] = -0.05
     ws['B19'].fill = input_fill
     ws['B19'].number_format = '0.0%'
     ws['C19'] = "<- Edit (usually negative)"
     ws['C19'].font = edit_font
+
+    if ai_analysis:
+        ws['D19'] = ai_analysis.suggested_terminal_rate
+        ws['D19'].fill = ai_fill
+        ws['D19'].number_format = '0.0%'
 
     # ============================================================================
     # SCENARIO ANALYSIS
@@ -231,13 +274,22 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['G20'] = "Base Weight"
     ws['H20'] = "Bull Weight"
 
-    ws['F21'] = 0.25
+    # Use AI-suggested weights if available
+    bear_weight = 0.25
+    base_weight = 0.50
+    bull_weight = 0.25
+    if ai_analysis and ai_analysis.scenario_probabilities:
+        bear_weight = ai_analysis.scenario_probabilities.get('bear', 25) / 100
+        base_weight = ai_analysis.scenario_probabilities.get('base', 50) / 100
+        bull_weight = ai_analysis.scenario_probabilities.get('bull', 25) / 100
+
+    ws['F21'] = bear_weight
     ws['F21'].fill = input_fill
     ws['F21'].number_format = '0%'
-    ws['G21'] = 0.50
+    ws['G21'] = base_weight
     ws['G21'].fill = input_fill
     ws['G21'].number_format = '0%'
-    ws['H21'] = 0.25
+    ws['H21'] = bull_weight
     ws['H21'].fill = input_fill
     ws['H21'].number_format = '0%'
     ws['I21'] = "<- Edit weights (must = 100%)"
@@ -443,89 +495,6 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['A56'] = "Rate"
 
     # ============================================================================
-    # KEY VALUE DRIVERS
-    # ============================================================================
-    ws['E29'] = "KEY VALUE DRIVERS"
-    ws['E29'].font = section_font
-
-    ws['E30'] = "Driver"
-    ws['E30'].font = header_font
-    ws['F30'] = "Impact"
-    ws['G30'] = "+1% Change"
-    ws['H30'] = "% Sensitivity"
-
-    ws['E31'] = "Royalty Growth Rate"
-    ws['F31'] = "High"
-    ws['G31'] = (
-        "=($B$13*(1+($B$16+0.01))^3*(1+$B$17)^2*(1+$B$19)/($B$18-$B$19))/(1+$B$18)^5"
-        "+$B$13/(1+$B$18)+$B$13*(1+($B$16+0.01))/(1+$B$18)^2"
-        "+$B$13*(1+($B$16+0.01))^2/(1+$B$18)^3"
-        "+$B$13*(1+($B$16+0.01))^3*(1+$B$17)/(1+$B$18)^4"
-        "+$B$13*(1+($B$16+0.01))^3*(1+$B$17)^2/(1+$B$18)^5"
-        "-B36"
-    )
-    ws['G31'].number_format = '+#,##0.00;-#,##0.00'
-    ws['H31'] = "=G31/B36"
-    ws['H31'].number_format = '+0.0%;-0.0%'
-
-    ws['E32'] = "Terminal Growth Rate"
-    ws['F32'] = "High"
-    ws['G32'] = (
-        "=($B$13*(1+$B$16)^3*(1+$B$17)^2*(1+($B$19+0.01))/($B$18-($B$19+0.01)))/(1+$B$18)^5"
-        "+$B$13/(1+$B$18)+$B$13*(1+$B$16)/(1+$B$18)^2"
-        "+$B$13*(1+$B$16)^2/(1+$B$18)^3"
-        "+$B$13*(1+$B$16)^3*(1+$B$17)/(1+$B$18)^4"
-        "+$B$13*(1+$B$16)^3*(1+$B$17)^2/(1+$B$18)^5"
-        "-B36"
-    )
-    ws['G32'].number_format = '+#,##0.00;-#,##0.00'
-    ws['H32'] = "=G32/B36"
-    ws['H32'].number_format = '+0.0%;-0.0%'
-
-    ws['E33'] = "Discount Rate"
-    ws['F33'] = "High"
-    ws['G33'] = (
-        "=($B$13*(1+$B$16)^3*(1+$B$17)^2*(1+$B$19)/(($B$18+0.01)-$B$19))/(1+($B$18+0.01))^5"
-        "+$B$13/(1+($B$18+0.01))+$B$13*(1+$B$16)/(1+($B$18+0.01))^2"
-        "+$B$13*(1+$B$16)^2/(1+($B$18+0.01))^3"
-        "+$B$13*(1+$B$16)^3*(1+$B$17)/(1+($B$18+0.01))^4"
-        "+$B$13*(1+$B$16)^3*(1+$B$17)^2/(1+($B$18+0.01))^5"
-        "-B36"
-    )
-    ws['G33'].number_format = '+#,##0.00;-#,##0.00'
-    ws['H33'] = "=G33/B36"
-    ws['H33'].number_format = '+0.0%;-0.0%'
-
-    # ============================================================================
-    # VALUE COMPOSITION
-    # ============================================================================
-    ws['E36'] = "VALUE COMPOSITION"
-    ws['E36'].font = section_font
-
-    ws['E37'] = "Component"
-    ws['E37'].font = header_font
-    ws['F37'] = "Value"
-    ws['G37'] = "% of Total"
-
-    ws['E38'] = "PV of 5-Year Cash Flows"
-    ws['F38'] = "=B34"
-    ws['F38'].number_format = '#,##0.00'
-    ws['G38'] = "=B34/B36"
-    ws['G38'].number_format = '0.0%'
-
-    ws['E39'] = "PV of Terminal Value"
-    ws['F39'] = "=B35"
-    ws['F39'].number_format = '#,##0.00'
-    ws['G39'] = "=B35/B36"
-    ws['G39'].number_format = '0.0%'
-
-    ws['E40'] = "Total Enterprise Value"
-    ws['F40'] = "=B36"
-    ws['F40'].number_format = '#,##0.00'
-    ws['F40'].font = Font(bold=True)
-    ws['G40'] = "100%"
-
-    # ============================================================================
     # MODEL NOTES
     # ============================================================================
     ws['A62'] = "MODEL NOTES"
@@ -533,6 +502,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
 
     notes = [
         "* Green cells are INPUT cells - edit these with your royalty data",
+        "* Purple cells show AI-suggested values (for reference)",
         "* Royalties = pure cash flow (no costs modeled)",
         "* Terminal Value = Year 5 CF x (1+g) / (r-g) using Gordon Growth Model",
         "* Two-phase growth: Years 1-3 near-term, Years 4-5 mature growth",
@@ -554,11 +524,241 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws.column_dimensions['H'].width = 14
     ws.column_dimensions['I'].width = 30
 
+    # =========================================================================
+    # AI INSIGHTS SHEET (if AI analysis available)
+    # =========================================================================
+    if ai_analysis:
+        ws_ai = wb.create_sheet("AI Analysis")
+
+        # Title
+        ws_ai['A1'] = "AI-POWERED ANALYSIS"
+        ws_ai['A1'].font = Font(bold=True, size=16, color="7B68EE")
+        ws_ai['A2'] = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        ws_ai['A2'].font = Font(italic=True, size=10, color="666666")
+
+        # AI Narrative Summary
+        ws_ai['A4'] = "EXECUTIVE SUMMARY"
+        ws_ai['A4'].font = section_font
+        ws_ai.merge_cells('A5:H7')
+        ws_ai['A5'] = ai_analysis.ai_narrative
+        ws_ai['A5'].alignment = Alignment(wrap_text=True, vertical='top')
+
+        # Suggested Parameters Section
+        ws_ai['A9'] = "AI-SUGGESTED PARAMETERS"
+        ws_ai['A9'].font = section_font
+
+        ws_ai['A10'] = "Parameter"
+        ws_ai['B10'] = "AI Suggestion"
+        ws_ai['C10'] = "Confidence"
+        ws_ai['D10'] = "Rationale"
+        for col in ['A', 'B', 'C', 'D']:
+            ws_ai[f'{col}10'].font = header_font
+
+        ws_ai['A11'] = "Growth Rate (Yr 1-3)"
+        ws_ai['B11'] = ai_analysis.suggested_growth_rate
+        ws_ai['B11'].number_format = '0.0%'
+        ws_ai['B11'].fill = ai_fill
+        ws_ai['C11'] = f"{ai_analysis.confidence_score:.0%}"
+        ws_ai['D11'] = "Based on historical CAGR with mean reversion"
+
+        ws_ai['A12'] = "Growth Rate (Yr 4-5)"
+        ws_ai['B12'] = ai_analysis.suggested_growth_rate * 0.6
+        ws_ai['B12'].number_format = '0.0%'
+        ws_ai['B12'].fill = ai_fill
+        ws_ai['C12'] = f"{ai_analysis.confidence_score:.0%}"
+        ws_ai['D12'] = "Mature phase assumes slower growth"
+
+        ws_ai['A13'] = "Terminal Growth Rate"
+        ws_ai['B13'] = ai_analysis.suggested_terminal_rate
+        ws_ai['B13'].number_format = '0.0%'
+        ws_ai['B13'].fill = ai_fill
+        ws_ai['C13'] = f"{ai_analysis.confidence_score:.0%}"
+        ws_ai['D13'] = "Conservative perpetual decline assumption"
+
+        ws_ai['A14'] = "Discount Rate"
+        ws_ai['B14'] = ai_analysis.suggested_discount_rate
+        ws_ai['B14'].number_format = '0.0%'
+        ws_ai['B14'].fill = ai_fill
+        ws_ai['C14'] = f"{ai_analysis.confidence_score:.0%}"
+        ws_ai['D14'] = "Risk-adjusted based on volatility"
+
+        # Risk Factors
+        ws_ai['A16'] = "RISK FACTORS"
+        ws_ai['A16'].font = section_font
+        for i, risk in enumerate(ai_analysis.risk_factors[:5]):
+            ws_ai[f'A{17+i}'] = f"- {risk}"
+            ws_ai[f'A{17+i}'].font = Font(color="CC0000")
+
+        # Opportunities
+        ws_ai['A23'] = "OPPORTUNITIES"
+        ws_ai['A23'].font = section_font
+        for i, opp in enumerate(ai_analysis.opportunities[:4]):
+            ws_ai[f'A{24+i}'] = f"- {opp}"
+            ws_ai[f'A{24+i}'].font = Font(color="006600")
+
+        # Column widths
+        ws_ai.column_dimensions['A'].width = 24
+        ws_ai.column_dimensions['B'].width = 16
+        ws_ai.column_dimensions['C'].width = 12
+        ws_ai.column_dimensions['D'].width = 40
+
+    # =========================================================================
+    # MONTE CARLO SHEET (if AI analysis available)
+    # =========================================================================
+    if ai_analysis and ai_analysis.monte_carlo_results:
+        ws_mc = wb.create_sheet("Monte Carlo")
+        mc = ai_analysis.monte_carlo_results
+
+        # Title
+        ws_mc['A1'] = "MONTE CARLO SIMULATION RESULTS"
+        ws_mc['A1'].font = Font(bold=True, size=16, color="7B68EE")
+        ws_mc['A2'] = f"Based on {mc['n_simulations']:,} simulations"
+        ws_mc['A2'].font = Font(italic=True, size=10, color="666666")
+
+        # Summary Statistics
+        ws_mc['A4'] = "VALUATION DISTRIBUTION"
+        ws_mc['A4'].font = section_font
+
+        ws_mc['A5'] = "Statistic"
+        ws_mc['B5'] = "Value"
+        ws_mc['A5'].font = header_font
+        ws_mc['B5'].font = header_font
+
+        ws_mc['A6'] = "Mean Valuation"
+        ws_mc['B6'] = mc['mean']
+        ws_mc['B6'].number_format = '$#,##0'
+
+        ws_mc['A7'] = "Median Valuation"
+        ws_mc['B7'] = mc['median']
+        ws_mc['B7'].number_format = '$#,##0'
+        ws_mc['B7'].fill = weighted_fill
+        ws_mc['B7'].font = Font(bold=True)
+
+        ws_mc['A8'] = "Standard Deviation"
+        ws_mc['B8'] = mc['std_dev']
+        ws_mc['B8'].number_format = '$#,##0'
+
+        # Percentiles
+        ws_mc['A10'] = "PERCENTILE DISTRIBUTION"
+        ws_mc['A10'].font = section_font
+
+        percentiles = mc['percentiles']
+        ws_mc['A11'] = "5th (Downside)"
+        ws_mc['B11'] = percentiles['p5']
+        ws_mc['B11'].number_format = '$#,##0'
+        ws_mc['B11'].fill = scenario_bear_fill
+
+        ws_mc['A12'] = "25th"
+        ws_mc['B12'] = percentiles['p25']
+        ws_mc['B12'].number_format = '$#,##0'
+
+        ws_mc['A13'] = "50th (Median)"
+        ws_mc['B13'] = percentiles['p50']
+        ws_mc['B13'].number_format = '$#,##0'
+        ws_mc['B13'].fill = scenario_base_fill
+        ws_mc['B13'].font = Font(bold=True)
+
+        ws_mc['A14'] = "75th"
+        ws_mc['B14'] = percentiles['p75']
+        ws_mc['B14'].number_format = '$#,##0'
+
+        ws_mc['A15'] = "95th (Upside)"
+        ws_mc['B15'] = percentiles['p95']
+        ws_mc['B15'].number_format = '$#,##0'
+        ws_mc['B15'].fill = scenario_bull_fill
+
+        # Confidence Intervals
+        ws_mc['A17'] = "CONFIDENCE INTERVALS"
+        ws_mc['A17'].font = section_font
+
+        ws_mc['A18'] = "90% Confidence Range:"
+        ws_mc['B18'] = percentiles['p5']
+        ws_mc['B18'].number_format = '$#,##0'
+        ws_mc['C18'] = "to"
+        ws_mc['D18'] = percentiles['p95']
+        ws_mc['D18'].number_format = '$#,##0'
+
+        ws_mc['A19'] = "80% Confidence Range:"
+        ws_mc['B19'] = percentiles['p10']
+        ws_mc['B19'].number_format = '$#,##0'
+        ws_mc['C19'] = "to"
+        ws_mc['D19'] = percentiles['p90']
+        ws_mc['D19'].number_format = '$#,##0'
+
+        # Column widths
+        ws_mc.column_dimensions['A'].width = 24
+        ws_mc.column_dimensions['B'].width = 16
+        ws_mc.column_dimensions['C'].width = 6
+        ws_mc.column_dimensions['D'].width = 14
+
+    # =========================================================================
+    # DECAY CURVE BENCHMARK SHEET (if AI analysis available)
+    # =========================================================================
+    if ai_analysis and ai_analysis.decay_curve_comparison:
+        ws_decay = wb.create_sheet("Decay Benchmarks")
+        benchmark = ai_analysis.decay_curve_comparison
+
+        # Title
+        ws_decay['A1'] = "DECAY CURVE BENCHMARK ANALYSIS"
+        ws_decay['A1'].font = Font(bold=True, size=16, color="7B68EE")
+        ws_decay['A2'] = f"Genre: {benchmark.get('genre', 'Mixed').replace('_', ' ').title()}"
+        ws_decay['A2'].font = Font(italic=True, size=11)
+
+        # Overall Assessment
+        ws_decay['A4'] = "OVERALL ASSESSMENT"
+        ws_decay['A4'].font = section_font
+        ws_decay['A5'] = benchmark.get('assessment', 'N/A')
+        status = benchmark.get('overall_status', 'at_benchmark')
+        if status == 'above_benchmark':
+            ws_decay['A5'].font = Font(bold=True, color="006600")
+        elif status == 'below_benchmark':
+            ws_decay['A5'].font = Font(bold=True, color="CC0000")
+        else:
+            ws_decay['A5'].font = Font(bold=True)
+
+        # Industry Benchmarks Reference
+        ws_decay['A7'] = "INDUSTRY DECAY BENCHMARKS BY GENRE"
+        ws_decay['A7'].font = section_font
+
+        ws_decay['A8'] = "Genre"
+        ws_decay['B8'] = "Year 1"
+        ws_decay['C8'] = "Year 2"
+        ws_decay['D8'] = "Year 3"
+        ws_decay['E8'] = "Year 4"
+        ws_decay['F8'] = "Year 5+"
+        for col in ['A', 'B', 'C', 'D', 'E', 'F']:
+            ws_decay[f'{col}8'].font = header_font
+
+        row = 9
+        for genre, rates in GENRE_DECAY_BENCHMARKS.items():
+            ws_decay[f'A{row}'] = genre.replace('_', ' ').title()
+            ws_decay[f'B{row}'] = rates['year_1']
+            ws_decay[f'C{row}'] = rates['year_2']
+            ws_decay[f'D{row}'] = rates['year_3']
+            ws_decay[f'E{row}'] = rates['year_4']
+            ws_decay[f'F{row}'] = rates['year_5_plus']
+            for col in ['B', 'C', 'D', 'E', 'F']:
+                ws_decay[f'{col}{row}'].number_format = '0%'
+
+            # Highlight selected genre
+            if genre == benchmark.get('genre', ''):
+                for col in ['A', 'B', 'C', 'D', 'E', 'F']:
+                    ws_decay[f'{col}{row}'].fill = ai_fill
+            row += 1
+
+        # Column widths
+        ws_decay.column_dimensions['A'].width = 16
+        ws_decay.column_dimensions['B'].width = 10
+        ws_decay.column_dimensions['C'].width = 10
+        ws_decay.column_dimensions['D'].width = 10
+        ws_decay.column_dimensions['E'].width = 10
+        ws_decay.column_dimensions['F'].width = 10
+
     wb.save(output_path)
     return output_path
 
 
-def process_royalty_file(csv_path):
+def process_royalty_file(csv_path, genre="mixed"):
     """Process a royalty CSV file and create a valuation spreadsheet."""
 
     # Read the CSV
@@ -613,8 +813,24 @@ def process_royalty_file(csv_path):
     # Base year = most recent full year
     base_year = year_minus_1 if year_minus_1 > 0 else ytd
 
+    # Convert yearly data to dict for AI analysis
+    yearly_data = {int(k): float(v) for k, v in yearly.items()}
+
+    # Run AI analysis if available
+    ai_analysis = None
+    if AI_AVAILABLE and base_year > 0:
+        try:
+            ai_analysis = run_full_analysis(
+                yearly_data=yearly_data,
+                base_year=base_year,
+                genre=genre,
+                n_simulations=1000
+            )
+        except Exception as e:
+            print(f"AI analysis error: {e}")
+            ai_analysis = None
+
     # Generate output filename
-    import re
     base_name = os.path.basename(csv_path)
     # Extract listing number if present
     if 'listing' in base_name.lower():
@@ -648,10 +864,12 @@ def process_royalty_file(csv_path):
         year_minus_1=year_minus_1,
         ytd=ytd,
         base_year=base_year,
-        output_path=output_path
+        output_path=output_path,
+        ai_analysis=ai_analysis,
+        yearly_data=yearly_data
     )
 
-    return output_path, royalty_name, yearly
+    return output_path, royalty_name, yearly, ai_analysis
 
 
 def main():
@@ -674,7 +892,7 @@ def main():
         return
 
     try:
-        output_path, royalty_name, yearly = process_royalty_file(file_path)
+        output_path, royalty_name, yearly, ai_analysis = process_royalty_file(file_path)
 
         # Build summary message
         summary = f"Valuation created for: {royalty_name}\n\n"
@@ -682,6 +900,16 @@ def main():
         for year, amount in sorted(yearly.items()):
             summary += f"  {int(year)}: ${amount:,.2f}\n"
         summary += f"\nTotal: ${yearly.sum():,.2f}\n"
+
+        if ai_analysis:
+            summary += f"\n--- AI Analysis ---\n"
+            summary += f"Suggested Growth: {ai_analysis.suggested_growth_rate:.1%}\n"
+            summary += f"Suggested Discount: {ai_analysis.suggested_discount_rate:.1%}\n"
+            summary += f"Confidence: {ai_analysis.confidence_score:.0%}\n"
+            mc = ai_analysis.monte_carlo_results
+            summary += f"\nMonte Carlo Median: ${mc['median']:,.0f}\n"
+            summary += f"90% Range: ${mc['percentiles']['p5']:,.0f} - ${mc['percentiles']['p95']:,.0f}\n"
+
         summary += f"\nSaved to:\n{output_path}"
 
         messagebox.showinfo("Success!", summary)

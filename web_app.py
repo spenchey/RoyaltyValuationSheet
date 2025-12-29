@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Music Royalty Valuation Tool - Web Version
+Music Royalty Valuation Tool - Web Version with AI-Powered Analysis
 Run this file and open the URL in any browser (including on your phone).
 """
 
@@ -9,14 +9,27 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.chart import LineChart, Reference, BarChart
 from datetime import datetime
 import os
 import io
 import re
 
+# Import AI analysis module
+try:
+    from ai_analysis import (
+        run_full_analysis,
+        GENRE_DECAY_BENCHMARKS,
+        VALUATION_MULTIPLES,
+        AIAnalysisResult
+    )
+    AI_AVAILABLE = True
+except ImportError:
+    AI_AVAILABLE = False
+
 app = Flask(__name__)
 
-# HTML Template - Mobile-friendly
+# HTML Template - Mobile-friendly with AI options
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -54,6 +67,16 @@ HTML_TEMPLATE = """
             text-align: center;
             margin-bottom: 30px;
             font-size: 14px;
+        }
+        .ai-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-left: 6px;
+            vertical-align: middle;
         }
         .upload-area {
             border: 2px dashed #ddd;
@@ -111,6 +134,93 @@ HTML_TEMPLATE = """
             color: #999;
             cursor: pointer;
             font-size: 18px;
+        }
+        .options-section {
+            background: #f8f9ff;
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .options-title {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 12px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .option-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .option-row:last-child {
+            margin-bottom: 0;
+        }
+        .option-row label {
+            flex: 1;
+            font-size: 13px;
+            color: #555;
+        }
+        .toggle {
+            position: relative;
+            width: 44px;
+            height: 24px;
+        }
+        .toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .3s;
+            border-radius: 24px;
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+        }
+        .toggle input:checked + .toggle-slider {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .toggle input:checked + .toggle-slider:before {
+            transform: translateX(20px);
+        }
+        select {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 13px;
+            background: white;
+            min-width: 120px;
+        }
+        .api-key-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-top: 8px;
+        }
+        .api-key-hint {
+            font-size: 11px;
+            color: #888;
+            margin-top: 4px;
         }
         .submit-btn {
             width: 100%;
@@ -196,12 +306,31 @@ HTML_TEMPLATE = """
         .instructions li {
             margin-bottom: 6px;
         }
+        .ai-features {
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid #e0e0e0;
+        }
+        .ai-features h4 {
+            font-size: 13px;
+            color: #667eea;
+            margin: 0 0 8px 0;
+        }
+        .ai-features ul {
+            margin: 0;
+            padding-left: 18px;
+            font-size: 12px;
+            color: #666;
+        }
+        .ai-features li {
+            margin-bottom: 4px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Royalty Valuation Tool</h1>
-        <p class="subtitle">Upload your earnings CSV to generate a DCF valuation</p>
+        <h1>Royalty Valuation Tool <span class="ai-badge">AI</span></h1>
+        <p class="subtitle">Upload your earnings CSV to generate a DCF valuation with AI-powered insights</p>
 
         <div class="error" id="error"></div>
         <div class="success" id="success"></div>
@@ -219,9 +348,51 @@ HTML_TEMPLATE = """
                 <button type="button" id="clearFile">&times;</button>
             </div>
 
+            <div class="options-section">
+                <div class="options-title">
+                    <span>AI Analysis Options</span>
+                </div>
+
+                <div class="option-row">
+                    <label for="enableAI">Enable AI-Powered Analysis</label>
+                    <div class="toggle">
+                        <input type="checkbox" id="enableAI" name="enable_ai" checked>
+                        <span class="toggle-slider"></span>
+                    </div>
+                </div>
+
+                <div class="option-row">
+                    <label for="genre">Genre Classification</label>
+                    <select id="genre" name="genre">
+                        <option value="mixed">Mixed/Unknown</option>
+                        <option value="pop">Pop</option>
+                        <option value="rock">Rock</option>
+                        <option value="hip_hop">Hip-Hop/Rap</option>
+                        <option value="country">Country</option>
+                        <option value="electronic">Electronic</option>
+                        <option value="classical">Classical</option>
+                    </select>
+                </div>
+
+                <div class="option-row">
+                    <label for="simulations">Monte Carlo Simulations</label>
+                    <select id="simulations" name="simulations">
+                        <option value="500">500 (Fast)</option>
+                        <option value="1000" selected>1,000 (Standard)</option>
+                        <option value="5000">5,000 (Detailed)</option>
+                    </select>
+                </div>
+
+                <div id="apiKeySection" style="margin-top: 12px;">
+                    <label style="font-size: 13px; color: #555;">Claude API Key (optional)</label>
+                    <input type="password" class="api-key-input" id="apiKey" name="api_key" placeholder="sk-ant-...">
+                    <div class="api-key-hint">For enhanced AI narrative. Works without it using statistical analysis.</div>
+                </div>
+            </div>
+
             <div class="loading" id="loading">
                 <div class="spinner"></div>
-                <div>Generating valuation...</div>
+                <div id="loadingText">Generating valuation...</div>
             </div>
 
             <button type="submit" class="submit-btn" id="submitBtn" disabled>
@@ -234,8 +405,20 @@ HTML_TEMPLATE = """
             <ol>
                 <li>Upload your royalty earnings CSV</li>
                 <li>We'll analyze the yearly totals</li>
+                <li>AI generates projections &amp; risk analysis</li>
                 <li>Download your complete DCF valuation spreadsheet</li>
             </ol>
+
+            <div class="ai-features">
+                <h4>AI-Powered Features:</h4>
+                <ul>
+                    <li>Monte Carlo simulations with probability distributions</li>
+                    <li>Genre-based decay curve benchmarking</li>
+                    <li>AI-suggested growth parameters</li>
+                    <li>Risk factors and opportunity analysis</li>
+                    <li>All original manual controls preserved</li>
+                </ul>
+            </div>
         </div>
     </div>
 
@@ -248,8 +431,10 @@ HTML_TEMPLATE = """
         const submitBtn = document.getElementById('submitBtn');
         const uploadForm = document.getElementById('uploadForm');
         const loading = document.getElementById('loading');
+        const loadingText = document.getElementById('loadingText');
         const errorDiv = document.getElementById('error');
         const successDiv = document.getElementById('success');
+        const enableAI = document.getElementById('enableAI');
 
         uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -298,6 +483,12 @@ HTML_TEMPLATE = """
             errorDiv.classList.remove('show');
             successDiv.classList.remove('show');
 
+            if (enableAI.checked) {
+                loadingText.textContent = 'Running AI analysis & Monte Carlo simulations...';
+            } else {
+                loadingText.textContent = 'Generating valuation...';
+            }
+
             const formData = new FormData(uploadForm);
 
             try {
@@ -333,6 +524,7 @@ HTML_TEMPLATE = """
                 errorDiv.classList.add('show');
             } finally {
                 loading.classList.remove('show');
+                loadingText.textContent = 'Generating valuation...';
                 submitBtn.disabled = !fileInput.files.length;
             }
         });
@@ -342,7 +534,8 @@ HTML_TEMPLATE = """
 """
 
 
-def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_minus_1, ytd, base_year):
+def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_minus_1, ytd, base_year,
+                              ai_analysis=None, yearly_data=None):
     """Creates the complete valuation template with data populated. Returns bytes."""
 
     wb = Workbook()
@@ -358,6 +551,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     scenario_base_fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
     scenario_bull_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
     weighted_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    ai_fill = PatternFill(start_color="E8DAEF", end_color="E8DAEF", fill_type="solid")  # Light purple for AI suggestions
 
     # TITLE
     ws['A1'] = "MUSIC ROYALTY DCF VALUATION MODEL"
@@ -417,9 +611,16 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['C13'] = "<- Edit (normalized starting CF)"
     ws['C13'].font = edit_font
 
-    # KEY ASSUMPTIONS
+    # KEY ASSUMPTIONS - Now with AI suggestions shown alongside
     ws['A15'] = "KEY ASSUMPTIONS"
     ws['A15'].font = section_font
+
+    # If AI analysis available, show suggestions
+    if ai_analysis:
+        ws['D15'] = "AI SUGGESTED"
+        ws['D15'].font = Font(bold=True, size=11, color="7B68EE")
+        ws['E15'] = "Confidence"
+        ws['E15'].font = Font(bold=True, size=11, color="7B68EE")
 
     ws['A16'] = "Growth Rate (Years 1-3)"
     ws['B16'] = 0.05
@@ -428,12 +629,24 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['C16'] = "<- Edit"
     ws['C16'].font = edit_font
 
+    if ai_analysis:
+        ws['D16'] = ai_analysis.suggested_growth_rate
+        ws['D16'].fill = ai_fill
+        ws['D16'].number_format = '0.0%'
+        ws['E16'] = f"{ai_analysis.confidence_score:.0%}"
+        ws['E16'].fill = ai_fill
+
     ws['A17'] = "Growth Rate (Years 4-5)"
     ws['B17'] = 0.03
     ws['B17'].fill = input_fill
     ws['B17'].number_format = '0.0%'
     ws['C17'] = "<- Edit"
     ws['C17'].font = edit_font
+
+    if ai_analysis:
+        ws['D17'] = ai_analysis.suggested_growth_rate * 0.6
+        ws['D17'].fill = ai_fill
+        ws['D17'].number_format = '0.0%'
 
     ws['A18'] = "Discount Rate"
     ws['B18'] = 0.12
@@ -442,12 +655,22 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['C18'] = "<- Edit"
     ws['C18'].font = edit_font
 
+    if ai_analysis:
+        ws['D18'] = ai_analysis.suggested_discount_rate
+        ws['D18'].fill = ai_fill
+        ws['D18'].number_format = '0.0%'
+
     ws['A19'] = "Terminal Growth Rate"
     ws['B19'] = -0.05
     ws['B19'].fill = input_fill
     ws['B19'].number_format = '0.0%'
     ws['C19'] = "<- Edit (usually negative)"
     ws['C19'].font = edit_font
+
+    if ai_analysis:
+        ws['D19'] = ai_analysis.suggested_terminal_rate
+        ws['D19'].fill = ai_fill
+        ws['D19'].number_format = '0.0%'
 
     # SCENARIO ANALYSIS
     ws['E4'] = "SCENARIO ANALYSIS"
@@ -547,13 +770,22 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['G20'] = "Base Weight"
     ws['H20'] = "Bull Weight"
 
-    ws['F21'] = 0.25
+    # Use AI-suggested weights if available
+    bear_weight = 0.25
+    base_weight = 0.50
+    bull_weight = 0.25
+    if ai_analysis and ai_analysis.scenario_probabilities:
+        bear_weight = ai_analysis.scenario_probabilities.get('bear', 25) / 100
+        base_weight = ai_analysis.scenario_probabilities.get('base', 50) / 100
+        bull_weight = ai_analysis.scenario_probabilities.get('bull', 25) / 100
+
+    ws['F21'] = bear_weight
     ws['F21'].fill = input_fill
     ws['F21'].number_format = '0%'
-    ws['G21'] = 0.50
+    ws['G21'] = base_weight
     ws['G21'].fill = input_fill
     ws['G21'].number_format = '0%'
-    ws['H21'] = 0.25
+    ws['H21'] = bull_weight
     ws['H21'].fill = input_fill
     ws['H21'].number_format = '0%'
     ws['I21'] = "<- Edit weights (must = 100%)"
@@ -756,6 +988,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
 
     notes = [
         "* Green cells are INPUT cells - edit these with your royalty data",
+        "* Purple cells show AI-suggested values (for reference)",
         "* Royalties = pure cash flow (no costs modeled)",
         "* Terminal Value = Year 5 CF x (1+g) / (r-g) using Gordon Growth Model",
         "* Two-phase growth: Years 1-3 near-term, Years 4-5 mature growth",
@@ -777,6 +1010,357 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws.column_dimensions['H'].width = 14
     ws.column_dimensions['I'].width = 30
 
+    # =========================================================================
+    # AI INSIGHTS SHEET (if AI analysis available)
+    # =========================================================================
+    if ai_analysis:
+        ws_ai = wb.create_sheet("AI Analysis")
+
+        # Title
+        ws_ai['A1'] = "AI-POWERED ANALYSIS"
+        ws_ai['A1'].font = Font(bold=True, size=16, color="7B68EE")
+        ws_ai['A2'] = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        ws_ai['A2'].font = Font(italic=True, size=10, color="666666")
+
+        # AI Narrative Summary
+        ws_ai['A4'] = "EXECUTIVE SUMMARY"
+        ws_ai['A4'].font = section_font
+        ws_ai.merge_cells('A5:H7')
+        ws_ai['A5'] = ai_analysis.ai_narrative
+        ws_ai['A5'].alignment = Alignment(wrap_text=True, vertical='top')
+
+        # Suggested Parameters Section
+        ws_ai['A9'] = "AI-SUGGESTED PARAMETERS"
+        ws_ai['A9'].font = section_font
+
+        ws_ai['A10'] = "Parameter"
+        ws_ai['B10'] = "AI Suggestion"
+        ws_ai['C10'] = "Confidence"
+        ws_ai['D10'] = "Rationale"
+        for col in ['A', 'B', 'C', 'D']:
+            ws_ai[f'{col}10'].font = header_font
+
+        ws_ai['A11'] = "Growth Rate (Yr 1-3)"
+        ws_ai['B11'] = ai_analysis.suggested_growth_rate
+        ws_ai['B11'].number_format = '0.0%'
+        ws_ai['B11'].fill = ai_fill
+        ws_ai['C11'] = f"{ai_analysis.confidence_score:.0%}"
+        ws_ai['D11'] = "Based on historical CAGR with mean reversion"
+
+        ws_ai['A12'] = "Growth Rate (Yr 4-5)"
+        ws_ai['B12'] = ai_analysis.suggested_growth_rate * 0.6
+        ws_ai['B12'].number_format = '0.0%'
+        ws_ai['B12'].fill = ai_fill
+        ws_ai['C12'] = f"{ai_analysis.confidence_score:.0%}"
+        ws_ai['D12'] = "Mature phase assumes slower growth"
+
+        ws_ai['A13'] = "Terminal Growth Rate"
+        ws_ai['B13'] = ai_analysis.suggested_terminal_rate
+        ws_ai['B13'].number_format = '0.0%'
+        ws_ai['B13'].fill = ai_fill
+        ws_ai['C13'] = f"{ai_analysis.confidence_score:.0%}"
+        ws_ai['D13'] = "Conservative perpetual decline assumption"
+
+        ws_ai['A14'] = "Discount Rate"
+        ws_ai['B14'] = ai_analysis.suggested_discount_rate
+        ws_ai['B14'].number_format = '0.0%'
+        ws_ai['B14'].fill = ai_fill
+        ws_ai['C14'] = f"{ai_analysis.confidence_score:.0%}"
+        ws_ai['D14'] = "Risk-adjusted based on volatility"
+
+        # Genre Classification
+        ws_ai['A16'] = "GENRE CLASSIFICATION"
+        ws_ai['A16'].font = section_font
+        ws_ai['A17'] = "Detected/Selected Genre:"
+        ws_ai['B17'] = ai_analysis.genre_classification.replace('_', ' ').title()
+        ws_ai['B17'].font = Font(bold=True)
+
+        # Benchmark Comparison
+        ws_ai['A19'] = "INDUSTRY BENCHMARK COMPARISON"
+        ws_ai['A19'].font = section_font
+
+        benchmark = ai_analysis.decay_curve_comparison
+        ws_ai['A20'] = "Status:"
+        ws_ai['B20'] = benchmark.get('assessment', 'N/A')
+
+        ws_ai['A21'] = "Your Avg Decay Rate:"
+        ws_ai['B21'] = benchmark.get('avg_actual_decay', 0)
+        ws_ai['B21'].number_format = '0.0%'
+
+        ws_ai['A22'] = "Industry Benchmark:"
+        ws_ai['B22'] = benchmark.get('avg_benchmark_decay', 0)
+        ws_ai['B22'].number_format = '0.0%'
+
+        ws_ai['A23'] = "Variance:"
+        variance = benchmark.get('variance_from_benchmark', 0)
+        ws_ai['B23'] = variance
+        ws_ai['B23'].number_format = '+0.0%;-0.0%'
+        if variance > 0:
+            ws_ai['B23'].font = Font(color="006600")  # Green for outperformance
+        elif variance < 0:
+            ws_ai['B23'].font = Font(color="CC0000")  # Red for underperformance
+
+        # Risk Factors
+        ws_ai['A25'] = "RISK FACTORS"
+        ws_ai['A25'].font = section_font
+        for i, risk in enumerate(ai_analysis.risk_factors[:5]):
+            ws_ai[f'A{26+i}'] = f"• {risk}"
+            ws_ai[f'A{26+i}'].font = Font(color="CC0000")
+
+        # Opportunities
+        ws_ai['A32'] = "OPPORTUNITIES"
+        ws_ai['A32'].font = section_font
+        for i, opp in enumerate(ai_analysis.opportunities[:4]):
+            ws_ai[f'A{33+i}'] = f"• {opp}"
+            ws_ai[f'A{33+i}'].font = Font(color="006600")
+
+        # Column widths
+        ws_ai.column_dimensions['A'].width = 24
+        ws_ai.column_dimensions['B'].width = 16
+        ws_ai.column_dimensions['C'].width = 12
+        ws_ai.column_dimensions['D'].width = 40
+        ws_ai.column_dimensions['E'].width = 14
+
+    # =========================================================================
+    # MONTE CARLO SHEET (if AI analysis available)
+    # =========================================================================
+    if ai_analysis and ai_analysis.monte_carlo_results:
+        ws_mc = wb.create_sheet("Monte Carlo")
+        mc = ai_analysis.monte_carlo_results
+
+        # Title
+        ws_mc['A1'] = "MONTE CARLO SIMULATION RESULTS"
+        ws_mc['A1'].font = Font(bold=True, size=16, color="7B68EE")
+        ws_mc['A2'] = f"Based on {mc['n_simulations']:,} simulations"
+        ws_mc['A2'].font = Font(italic=True, size=10, color="666666")
+
+        # Summary Statistics
+        ws_mc['A4'] = "VALUATION DISTRIBUTION"
+        ws_mc['A4'].font = section_font
+
+        ws_mc['A5'] = "Statistic"
+        ws_mc['B5'] = "Value"
+        ws_mc['A5'].font = header_font
+        ws_mc['B5'].font = header_font
+
+        ws_mc['A6'] = "Mean Valuation"
+        ws_mc['B6'] = mc['mean']
+        ws_mc['B6'].number_format = '$#,##0'
+
+        ws_mc['A7'] = "Median Valuation"
+        ws_mc['B7'] = mc['median']
+        ws_mc['B7'].number_format = '$#,##0'
+        ws_mc['B7'].fill = weighted_fill
+        ws_mc['B7'].font = Font(bold=True)
+
+        ws_mc['A8'] = "Standard Deviation"
+        ws_mc['B8'] = mc['std_dev']
+        ws_mc['B8'].number_format = '$#,##0'
+
+        ws_mc['A9'] = "Minimum"
+        ws_mc['B9'] = mc['min']
+        ws_mc['B9'].number_format = '$#,##0'
+
+        ws_mc['A10'] = "Maximum"
+        ws_mc['B10'] = mc['max']
+        ws_mc['B10'].number_format = '$#,##0'
+
+        # Percentiles
+        ws_mc['A12'] = "PERCENTILE DISTRIBUTION"
+        ws_mc['A12'].font = section_font
+
+        ws_mc['A13'] = "Percentile"
+        ws_mc['B13'] = "Valuation"
+        ws_mc['C13'] = "Interpretation"
+        for col in ['A', 'B', 'C']:
+            ws_mc[f'{col}13'].font = header_font
+
+        percentiles = mc['percentiles']
+        ws_mc['A14'] = "5th (Downside)"
+        ws_mc['B14'] = percentiles['p5']
+        ws_mc['B14'].number_format = '$#,##0'
+        ws_mc['B14'].fill = scenario_bear_fill
+        ws_mc['C14'] = "Worst 5% of outcomes"
+
+        ws_mc['A15'] = "10th"
+        ws_mc['B15'] = percentiles['p10']
+        ws_mc['B15'].number_format = '$#,##0'
+        ws_mc['C15'] = "Conservative estimate"
+
+        ws_mc['A16'] = "25th"
+        ws_mc['B16'] = percentiles['p25']
+        ws_mc['B16'].number_format = '$#,##0'
+        ws_mc['C16'] = "Lower quartile"
+
+        ws_mc['A17'] = "50th (Median)"
+        ws_mc['B17'] = percentiles['p50']
+        ws_mc['B17'].number_format = '$#,##0'
+        ws_mc['B17'].fill = scenario_base_fill
+        ws_mc['B17'].font = Font(bold=True)
+        ws_mc['C17'] = "Most likely outcome"
+
+        ws_mc['A18'] = "75th"
+        ws_mc['B18'] = percentiles['p75']
+        ws_mc['B18'].number_format = '$#,##0'
+        ws_mc['C18'] = "Upper quartile"
+
+        ws_mc['A19'] = "90th"
+        ws_mc['B19'] = percentiles['p90']
+        ws_mc['B19'].number_format = '$#,##0'
+        ws_mc['C19'] = "Optimistic estimate"
+
+        ws_mc['A20'] = "95th (Upside)"
+        ws_mc['B20'] = percentiles['p95']
+        ws_mc['B20'].number_format = '$#,##0'
+        ws_mc['B20'].fill = scenario_bull_fill
+        ws_mc['C20'] = "Best 5% of outcomes"
+
+        # Confidence Intervals
+        ws_mc['A22'] = "CONFIDENCE INTERVALS"
+        ws_mc['A22'].font = section_font
+
+        ws_mc['A23'] = "90% Confidence Range:"
+        ws_mc['B23'] = percentiles['p5']
+        ws_mc['B23'].number_format = '$#,##0'
+        ws_mc['C23'] = "to"
+        ws_mc['D23'] = percentiles['p95']
+        ws_mc['D23'].number_format = '$#,##0'
+
+        ws_mc['A24'] = "80% Confidence Range:"
+        ws_mc['B24'] = percentiles['p10']
+        ws_mc['B24'].number_format = '$#,##0'
+        ws_mc['C24'] = "to"
+        ws_mc['D24'] = percentiles['p90']
+        ws_mc['D24'].number_format = '$#,##0'
+
+        ws_mc['A25'] = "50% Confidence Range:"
+        ws_mc['B25'] = percentiles['p25']
+        ws_mc['B25'].number_format = '$#,##0'
+        ws_mc['C25'] = "to"
+        ws_mc['D25'] = percentiles['p75']
+        ws_mc['D25'].number_format = '$#,##0'
+
+        # Risk Metrics
+        ws_mc['A27'] = "RISK METRICS"
+        ws_mc['A27'].font = section_font
+
+        ws_mc['A28'] = "Downside Risk (P10)"
+        ws_mc['B28'] = mc['downside_risk']
+        ws_mc['B28'].number_format = '$#,##0'
+        ws_mc['C28'] = "10% chance of being below this"
+
+        ws_mc['A29'] = "Upside Potential (P90)"
+        ws_mc['B29'] = mc['upside_potential']
+        ws_mc['B29'].number_format = '$#,##0'
+        ws_mc['C29'] = "10% chance of exceeding this"
+
+        ws_mc['A30'] = "Value at Risk (vs Median)"
+        ws_mc['B30'] = percentiles['p50'] - percentiles['p10']
+        ws_mc['B30'].number_format = '$#,##0'
+        ws_mc['C30'] = "Potential downside from median"
+
+        # Column widths
+        ws_mc.column_dimensions['A'].width = 24
+        ws_mc.column_dimensions['B'].width = 16
+        ws_mc.column_dimensions['C'].width = 26
+        ws_mc.column_dimensions['D'].width = 14
+
+    # =========================================================================
+    # DECAY CURVE BENCHMARK SHEET (if AI analysis available)
+    # =========================================================================
+    if ai_analysis and ai_analysis.decay_curve_comparison:
+        ws_decay = wb.create_sheet("Decay Benchmarks")
+        benchmark = ai_analysis.decay_curve_comparison
+
+        # Title
+        ws_decay['A1'] = "DECAY CURVE BENCHMARK ANALYSIS"
+        ws_decay['A1'].font = Font(bold=True, size=16, color="7B68EE")
+        ws_decay['A2'] = f"Genre: {benchmark.get('genre', 'Mixed').replace('_', ' ').title()}"
+        ws_decay['A2'].font = Font(italic=True, size=11)
+
+        # Genre description
+        ws_decay['A3'] = benchmark.get('genre_description', '')
+        ws_decay['A3'].font = Font(italic=True, size=10, color="666666")
+
+        # Overall Assessment
+        ws_decay['A5'] = "OVERALL ASSESSMENT"
+        ws_decay['A5'].font = section_font
+        ws_decay['A6'] = benchmark.get('assessment', 'N/A')
+        status = benchmark.get('overall_status', 'at_benchmark')
+        if status == 'above_benchmark':
+            ws_decay['A6'].font = Font(bold=True, color="006600")
+        elif status == 'below_benchmark':
+            ws_decay['A6'].font = Font(bold=True, color="CC0000")
+        else:
+            ws_decay['A6'].font = Font(bold=True)
+
+        # Year-by-Year Comparison
+        ws_decay['A8'] = "YEAR-BY-YEAR COMPARISON"
+        ws_decay['A8'].font = section_font
+
+        ws_decay['A9'] = "Year"
+        ws_decay['B9'] = "Your Decay"
+        ws_decay['C9'] = "Benchmark"
+        ws_decay['D9'] = "Difference"
+        ws_decay['E9'] = "Status"
+        for col in ['A', 'B', 'C', 'D', 'E']:
+            ws_decay[f'{col}9'].font = header_font
+
+        year_by_year = benchmark.get('year_by_year', [])
+        for i, yby in enumerate(year_by_year[:5]):
+            row = 10 + i
+            ws_decay[f'A{row}'] = f"Year {yby['year']}"
+            ws_decay[f'B{row}'] = yby['actual']
+            ws_decay[f'B{row}'].number_format = '0.0%'
+            ws_decay[f'C{row}'] = yby['benchmark']
+            ws_decay[f'C{row}'].number_format = '0.0%'
+            ws_decay[f'D{row}'] = yby['difference']
+            ws_decay[f'D{row}'].number_format = '+0.0%;-0.0%'
+            ws_decay[f'E{row}'] = yby['status'].replace('_', ' ').title()
+
+            if yby['status'] == 'outperforming':
+                ws_decay[f'E{row}'].font = Font(color="006600")
+            elif yby['status'] == 'underperforming':
+                ws_decay[f'E{row}'].font = Font(color="CC0000")
+
+        # Industry Benchmarks Reference
+        ws_decay['A17'] = "INDUSTRY DECAY BENCHMARKS BY GENRE"
+        ws_decay['A17'].font = section_font
+
+        ws_decay['A18'] = "Genre"
+        ws_decay['B18'] = "Year 1"
+        ws_decay['C18'] = "Year 2"
+        ws_decay['D18'] = "Year 3"
+        ws_decay['E18'] = "Year 4"
+        ws_decay['F18'] = "Year 5+"
+        for col in ['A', 'B', 'C', 'D', 'E', 'F']:
+            ws_decay[f'{col}18'].font = header_font
+
+        row = 19
+        for genre, rates in GENRE_DECAY_BENCHMARKS.items():
+            ws_decay[f'A{row}'] = genre.replace('_', ' ').title()
+            ws_decay[f'B{row}'] = rates['year_1']
+            ws_decay[f'C{row}'] = rates['year_2']
+            ws_decay[f'D{row}'] = rates['year_3']
+            ws_decay[f'E{row}'] = rates['year_4']
+            ws_decay[f'F{row}'] = rates['year_5_plus']
+            for col in ['B', 'C', 'D', 'E', 'F']:
+                ws_decay[f'{col}{row}'].number_format = '0%'
+
+            # Highlight selected genre
+            if genre == benchmark.get('genre', ''):
+                for col in ['A', 'B', 'C', 'D', 'E', 'F']:
+                    ws_decay[f'{col}{row}'].fill = ai_fill
+            row += 1
+
+        # Column widths
+        ws_decay.column_dimensions['A'].width = 20
+        ws_decay.column_dimensions['B'].width = 12
+        ws_decay.column_dimensions['C'].width = 12
+        ws_decay.column_dimensions['D'].width = 12
+        ws_decay.column_dimensions['E'].width = 14
+        ws_decay.column_dimensions['F'].width = 12
+
     # Save to bytes
     output = io.BytesIO()
     wb.save(output)
@@ -784,7 +1368,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     return output
 
 
-def process_csv(file_storage):
+def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000, api_key=None):
     """Process uploaded CSV and return Excel bytes + filename."""
 
     # Read the file
@@ -842,6 +1426,24 @@ def process_csv(file_storage):
     # Base year = most recent full year
     base_year = year_minus_1 if year_minus_1 > 0 else ytd
 
+    # Convert yearly data to dict for AI analysis
+    yearly_data = {int(k): float(v) for k, v in yearly.items()}
+
+    # Run AI analysis if enabled
+    ai_analysis = None
+    if enable_ai and AI_AVAILABLE and base_year > 0:
+        try:
+            ai_analysis = run_full_analysis(
+                yearly_data=yearly_data,
+                base_year=base_year,
+                genre=genre,
+                api_key=api_key,
+                n_simulations=n_simulations
+            )
+        except Exception as e:
+            print(f"AI analysis error: {e}")
+            ai_analysis = None
+
     # Generate output filename
     base_name = os.path.splitext(filename)[0]
     if 'listing' in base_name.lower():
@@ -862,7 +1464,9 @@ def process_csv(file_storage):
         year_minus_2=year_minus_2,
         year_minus_1=year_minus_1,
         ytd=ytd,
-        base_year=base_year
+        base_year=base_year,
+        ai_analysis=ai_analysis,
+        yearly_data=yearly_data
     )
 
     return excel_bytes, output_filename
@@ -883,7 +1487,19 @@ def process():
         return 'No file selected', 400
 
     try:
-        excel_bytes, output_filename = process_csv(file)
+        # Get options from form
+        enable_ai = request.form.get('enable_ai') == 'on'
+        genre = request.form.get('genre', 'mixed')
+        n_simulations = int(request.form.get('simulations', 1000))
+        api_key = request.form.get('api_key', '').strip() or None
+
+        excel_bytes, output_filename = process_csv(
+            file,
+            enable_ai=enable_ai,
+            genre=genre,
+            n_simulations=n_simulations,
+            api_key=api_key
+        )
 
         response = send_file(
             excel_bytes,
@@ -909,12 +1525,13 @@ if __name__ == '__main__':
         local_ip = '127.0.0.1'
 
     print("\n" + "="*50)
-    print("  ROYALTY VALUATION TOOL - WEB VERSION")
+    print("  ROYALTY VALUATION TOOL - AI-POWERED VERSION")
     print("="*50)
     print(f"\n  Open in browser:")
     print(f"    - On this computer: http://localhost:5000")
     print(f"    - On your phone:    http://{local_ip}:5000")
     print(f"\n  (Make sure your phone is on the same WiFi)")
+    print(f"\n  AI Analysis: {'ENABLED' if AI_AVAILABLE else 'DISABLED (install numpy)'}")
     print("\n  Press Ctrl+C to stop the server")
     print("="*50 + "\n")
 
