@@ -1,5 +1,5 @@
 @echo off
-REM Music Royalty Valuation Tool - Windows Launcher
+REM Music Royalty Valuation Tool - Windows Launcher (Desktop Version)
 REM Double-click this file to run the tool
 
 cd /d "%~dp0"
@@ -13,10 +13,8 @@ if errorlevel 1 (
 )
 
 REM Check/install required packages
-python -c "import pandas, openpyxl" 2>nul || (
-    echo Installing required packages...
-    pip install pandas openpyxl --quiet
-)
+echo Checking dependencies...
+pip install -r requirements.txt --quiet
 
 REM Run the tool
 python royalty_valuation.py
