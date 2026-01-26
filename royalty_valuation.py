@@ -28,7 +28,7 @@ except ImportError:
 
 
 def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_minus_1, ytd, base_year,
-                              output_path, ai_analysis=None, yearly_data=None):
+                              output_path, ai_analysis=None, yearly_data=None, raw_data=None):
     """Creates the complete valuation template with data populated."""
 
     wb = Workbook()
@@ -754,6 +754,32 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
         ws_decay.column_dimensions['E'].width = 10
         ws_decay.column_dimensions['F'].width = 10
 
+    # =========================================================================
+    # RAW DATA SHEET (if raw data provided)
+    # =========================================================================
+    if raw_data is not None:
+        ws_raw = wb.create_sheet(title="Raw Data")
+
+        # Write headers
+        for col_idx, col_name in enumerate(raw_data.columns, 1):
+            cell = ws_raw.cell(row=1, column=col_idx, value=col_name)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+
+        # Write data rows
+        for row_idx, row in enumerate(raw_data.itertuples(index=False), 2):
+            for col_idx, value in enumerate(row, 1):
+                ws_raw.cell(row=row_idx, column=col_idx, value=value)
+
+        # Auto-adjust column widths based on content
+        for col_idx, col_name in enumerate(raw_data.columns, 1):
+            max_length = len(str(col_name))
+            for row_idx in range(2, min(len(raw_data) + 2, 100)):  # Sample first 100 rows
+                cell_value = ws_raw.cell(row=row_idx, column=col_idx).value
+                if cell_value:
+                    max_length = max(max_length, len(str(cell_value)))
+            ws_raw.column_dimensions[get_column_letter(col_idx)].width = min(max_length + 2, 50)
+
     wb.save(output_path)
     return output_path
 
@@ -866,7 +892,8 @@ def process_royalty_file(csv_path, genre="mixed"):
         base_year=base_year,
         output_path=output_path,
         ai_analysis=ai_analysis,
-        yearly_data=yearly_data
+        yearly_data=yearly_data,
+        raw_data=df
     )
 
     return output_path, royalty_name, yearly, ai_analysis
