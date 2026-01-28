@@ -4,9 +4,11 @@ Music Royalty Valuation Tool - Web Version with AI-Powered Analysis
 Run this file and open the URL in any browser (including on your phone).
 """
 
-# Load environment variables from .env file
+# Load environment variables from .env file in Dropbox folder
+import os
 from dotenv import load_dotenv
-load_dotenv()
+env_path = os.path.join(os.path.expanduser("~"), "Dropbox", "Royalty Analysis", "Royalty Valuation Tool", ".env")
+load_dotenv(env_path)
 
 from flask import Flask, request, send_file, render_template_string
 import pandas as pd
@@ -15,7 +17,6 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import LineChart, Reference, BarChart
 from datetime import datetime
-import os
 import io
 import re
 
