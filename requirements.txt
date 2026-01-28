@@ -5,3 +5,4 @@ gunicorn
 numpy
 anthropic
 pyyaml
+python-dotenv

@@ -44,3 +44,6 @@ Output Sheets/*.xlsx
 
 # Temporary skill repos
 _temp_*/
+
+# Environment secrets
+.env

@@ -4,6 +4,10 @@ Music Royalty Valuation Tool - Web Version with AI-Powered Analysis
 Run this file and open the URL in any browser (including on your phone).
 """
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import Flask, request, send_file, render_template_string
 import pandas as pd
 from openpyxl import Workbook
@@ -385,8 +389,13 @@ HTML_TEMPLATE = """
 
                 <div id="apiKeySection" style="margin-top: 12px;">
                     <label style="font-size: 13px; color: #555;">Claude OAuth Token (optional)</label>
+                    {% if token_configured %}
+                    <input type="password" class="api-key-input" id="oauthToken" name="oauth_token" placeholder="Using token from .env" style="background: #e8f5e9;">
+                    <div class="api-key-hint" style="color: #2e7d32;">Token configured via .env file. Leave blank to use it, or enter a different one.</div>
+                    {% else %}
                     <input type="password" class="api-key-input" id="oauthToken" name="oauth_token" placeholder="Enter your OAuth token...">
                     <div class="api-key-hint">For enhanced AI narrative. Works without it using statistical analysis.</div>
+                    {% endif %}
                 </div>
             </div>
 
@@ -1501,7 +1510,8 @@ def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000,
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    token_configured = bool(os.environ.get('ANTHROPIC_OAUTH_TOKEN'))
+    return render_template_string(HTML_TEMPLATE, token_configured=token_configured)
 
 
 @app.route('/process', methods=['POST'])
@@ -1518,7 +1528,7 @@ def process():
         enable_ai = request.form.get('enable_ai') == 'on'
         genre = request.form.get('genre', 'mixed')
         n_simulations = int(request.form.get('simulations', 1000))
-        oauth_token = request.form.get('oauth_token', '').strip() or None
+        oauth_token = request.form.get('oauth_token', '').strip() or os.environ.get('ANTHROPIC_OAUTH_TOKEN') or None
 
         excel_bytes, output_filename = process_csv(
             file,
