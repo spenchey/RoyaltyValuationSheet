@@ -384,8 +384,8 @@ HTML_TEMPLATE = """
                 </div>
 
                 <div id="apiKeySection" style="margin-top: 12px;">
-                    <label style="font-size: 13px; color: #555;">Claude API Key (optional)</label>
-                    <input type="password" class="api-key-input" id="apiKey" name="api_key" placeholder="sk-ant-...">
+                    <label style="font-size: 13px; color: #555;">Claude OAuth Token (optional)</label>
+                    <input type="password" class="api-key-input" id="oauthToken" name="oauth_token" placeholder="Enter your OAuth token...">
                     <div class="api-key-hint">For enhanced AI narrative. Works without it using statistical analysis.</div>
                 </div>
             </div>
@@ -1394,7 +1394,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     return output
 
 
-def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000, api_key=None):
+def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000, oauth_token=None):
     """Process uploaded CSV and return Excel bytes + filename."""
 
     # Read the file
@@ -1463,7 +1463,7 @@ def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000,
                 yearly_data=yearly_data,
                 base_year=base_year,
                 genre=genre,
-                api_key=api_key,
+                oauth_token=oauth_token,
                 n_simulations=n_simulations
             )
         except Exception as e:
@@ -1518,14 +1518,14 @@ def process():
         enable_ai = request.form.get('enable_ai') == 'on'
         genre = request.form.get('genre', 'mixed')
         n_simulations = int(request.form.get('simulations', 1000))
-        api_key = request.form.get('api_key', '').strip() or None
+        oauth_token = request.form.get('oauth_token', '').strip() or None
 
         excel_bytes, output_filename = process_csv(
             file,
             enable_ai=enable_ai,
             genre=genre,
             n_simulations=n_simulations,
-            api_key=api_key
+            oauth_token=oauth_token
         )
 
         response = send_file(

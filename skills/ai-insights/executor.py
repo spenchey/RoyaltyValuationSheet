@@ -258,20 +258,23 @@ def generate_narrative(
 def call_claude_api(
     yearly_data: Dict[int, float],
     trend_analysis: Dict[str, Any],
-    api_key: Optional[str] = None
+    oauth_token: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    """Call Claude API for enhanced analysis (optional)."""
+    """Call Claude API for enhanced analysis (optional). Uses OAuth authentication."""
 
-    if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not oauth_token:
+        oauth_token = os.environ.get("ANTHROPIC_OAUTH_TOKEN")
 
-    if not api_key:
+    if not oauth_token:
         return None
 
     try:
         import anthropic
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(
+            api_key=oauth_token,
+            base_url="https://api.anthropic.com/v1"
+        )
 
         prompt = f"""Analyze this music royalty catalog data and provide investment insights:
 
@@ -328,7 +331,7 @@ def execute(
     trend_analysis: Optional[Dict[str, Any]] = None,
     benchmark_comparison: Optional[Dict[str, Any]] = None,
     monte_carlo: Optional[Dict[str, Any]] = None,
-    api_key: Optional[str] = None
+    oauth_token: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Generate AI-powered insights for royalty valuation.
@@ -339,7 +342,7 @@ def execute(
         trend_analysis: Pre-computed trend analysis (optional)
         benchmark_comparison: Decay curve comparison results (optional)
         monte_carlo: Monte Carlo simulation results (optional)
-        api_key: Claude API key for enhanced insights (optional)
+        oauth_token: OAuth token for enhanced insights (optional)
 
     Returns:
         Dictionary with suggested parameters and analysis
@@ -353,7 +356,7 @@ def execute(
     params = suggest_parameters(trend_analysis)
 
     # Try Claude API for enhanced insights
-    ai_response = call_claude_api(yearly_data, trend_analysis, api_key)
+    ai_response = call_claude_api(yearly_data, trend_analysis, oauth_token)
 
     if ai_response:
         genre = ai_response.get("genre", "mixed")

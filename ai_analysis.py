@@ -387,22 +387,26 @@ def compare_to_industry_benchmark(
 def call_claude_api(
     yearly_data: Dict[int, float],
     trend_analysis: Dict,
-    api_key: Optional[str] = None
+    oauth_token: Optional[str] = None
 ) -> Optional[Dict]:
     """
     Call Claude API for advanced analysis and narrative generation.
-    Returns None if API key not available.
+    Returns None if OAuth token not available.
+    Uses OAuth authentication for Claude Max subscribers.
     """
-    if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not oauth_token:
+        oauth_token = os.environ.get("ANTHROPIC_OAUTH_TOKEN")
 
-    if not api_key:
+    if not oauth_token:
         return None
 
     try:
         import anthropic
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic(
+            api_key=oauth_token,
+            base_url="https://api.anthropic.com/v1"
+        )
 
         # Prepare the analysis prompt
         prompt = f"""Analyze this music royalty catalog data and provide investment insights:
@@ -558,12 +562,12 @@ def run_full_analysis(
     yearly_data: Dict[int, float],
     base_year: float,
     genre: str = "mixed",
-    api_key: Optional[str] = None,
+    oauth_token: Optional[str] = None,
     n_simulations: int = 1000
 ) -> AIAnalysisResult:
     """
     Run complete AI-powered analysis pipeline.
-    Works with or without API key (falls back to statistical analysis).
+    Works with or without OAuth token (falls back to statistical analysis).
     """
 
     # Step 1: Analyze historical trends
@@ -586,7 +590,7 @@ def run_full_analysis(
     benchmark_comparison = compare_to_industry_benchmark(yearly_data, genre)
 
     # Step 5: Try Claude API for enhanced insights
-    ai_response = call_claude_api(yearly_data, trend_analysis, api_key)
+    ai_response = call_claude_api(yearly_data, trend_analysis, oauth_token)
 
     if ai_response:
         genre_classification = ai_response.get("genre", genre)

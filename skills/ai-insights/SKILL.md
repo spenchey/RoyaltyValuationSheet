@@ -56,7 +56,7 @@ This skill provides intelligent analysis and narrative generation for music roya
 | trend_analysis | dict | Pre-computed trend analysis | None |
 | benchmark_comparison | dict | Decay curve comparison | None |
 | monte_carlo | dict | Monte Carlo results | None |
-| api_key | str | Claude API key (optional) | None |
+| oauth_token | str | OAuth token (optional) | None |
 
 ## Output
 

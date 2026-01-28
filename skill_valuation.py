@@ -74,7 +74,7 @@ class SkillValuationEngine:
         base_year_cf: Optional[float] = None,
         genre: str = "mixed",
         n_simulations: int = 1000,
-        api_key: Optional[str] = None
+        oauth_token: Optional[str] = None
     ) -> ValuationResult:
         """
         Run complete valuation analysis using all available skills.
@@ -85,7 +85,7 @@ class SkillValuationEngine:
             base_year_cf: Starting cash flow (defaults to most recent year)
             genre: Music genre for benchmarking
             n_simulations: Number of Monte Carlo simulations
-            api_key: Optional Claude API key for enhanced insights
+            oauth_token: Optional OAuth token for enhanced insights
 
         Returns:
             ValuationResult with comprehensive analysis
@@ -112,7 +112,7 @@ class SkillValuationEngine:
                 "ai-insights",
                 yearly_data=yearly_data,
                 base_year_cf=base_year_cf,
-                api_key=api_key
+                oauth_token=oauth_token
             )
             result.ai_insights = ai_insights
             result.skills_used.append("ai-insights")
@@ -245,7 +245,7 @@ class SkillValuationEngine:
         csv_path: str,
         genre: str = "mixed",
         n_simulations: int = 1000,
-        api_key: Optional[str] = None
+        oauth_token: Optional[str] = None
     ) -> ValuationResult:
         """
         Analyze a CSV file and run full valuation.
@@ -254,7 +254,7 @@ class SkillValuationEngine:
             csv_path: Path to CSV file with royalty data
             genre: Music genre for benchmarking
             n_simulations: Number of Monte Carlo simulations
-            api_key: Optional Claude API key
+            oauth_token: Optional OAuth token
 
         Returns:
             ValuationResult with comprehensive analysis
@@ -310,7 +310,7 @@ class SkillValuationEngine:
             yearly_data=yearly_data,
             genre=genre,
             n_simulations=n_simulations,
-            api_key=api_key
+            oauth_token=oauth_token
         )
 
 
@@ -331,7 +331,7 @@ def create_pipeline(registry: SkillRegistry) -> SkillPipeline:
     pipeline.add_step("ai-insights", lambda d: {
         "yearly_data": d["yearly_data"],
         "base_year_cf": d["base_year_cf"],
-        "api_key": d.get("api_key")
+        "oauth_token": d.get("oauth_token")
     })
 
     pipeline.add_step("decay-curves", lambda d: {
