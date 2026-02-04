@@ -1494,7 +1494,7 @@ def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000,
                 yearly_data=yearly_data,
                 base_year=base_year,
                 genre=genre,
-                oauth_token=api_key,  # Parameter is called oauth_token in ai_analysis.py
+                api_key=api_key,
                 n_simulations=n_simulations
             )
         except Exception as e:
