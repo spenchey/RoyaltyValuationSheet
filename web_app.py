@@ -4,12 +4,6 @@ Music Royalty Valuation Tool - Web Version with AI-Powered Analysis
 Run this file and open the URL in any browser (including on your phone).
 """
 
-# Load environment variables from .env file in Dropbox folder
-import os
-from dotenv import load_dotenv
-env_path = os.path.join(os.path.expanduser("~"), "Dropbox", "Royalty Analysis", "Royalty Valuation Tool", ".env")
-load_dotenv(env_path)
-
 from flask import Flask, request, send_file, render_template_string
 import pandas as pd
 from openpyxl import Workbook
@@ -17,6 +11,7 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import LineChart, Reference, BarChart
 from datetime import datetime
+import os
 import io
 import re
 
@@ -389,14 +384,9 @@ HTML_TEMPLATE = """
                 </div>
 
                 <div id="apiKeySection" style="margin-top: 12px;">
-                    <label style="font-size: 13px; color: #555;">Claude OAuth Token (optional)</label>
-                    {% if token_configured %}
-                    <input type="password" class="api-key-input" id="oauthToken" name="oauth_token" placeholder="Using token from .env" style="background: #e8f5e9;">
-                    <div class="api-key-hint" style="color: #2e7d32;">Token configured via .env file. Leave blank to use it, or enter a different one.</div>
-                    {% else %}
-                    <input type="password" class="api-key-input" id="oauthToken" name="oauth_token" placeholder="Enter your OAuth token...">
+                    <label style="font-size: 13px; color: #555;">Claude API Key (optional)</label>
+                    <input type="password" class="api-key-input" id="apiKey" name="api_key" placeholder="sk-ant-...">
                     <div class="api-key-hint">For enhanced AI narrative. Works without it using statistical analysis.</div>
-                    {% endif %}
                 </div>
             </div>
 
@@ -518,7 +508,12 @@ HTML_TEMPLATE = """
                     window.URL.revokeObjectURL(url);
                     a.remove();
 
-                    successDiv.textContent = 'Valuation generated! Check your downloads.';
+                    const savedPath = response.headers.get('X-Saved-Path');
+                    if (savedPath) {
+                        successDiv.innerHTML = '✅ Valuation generated!<br><small>Also saved to: Output Sheets/</small>';
+                    } else {
+                        successDiv.textContent = 'Valuation generated! Check your downloads.';
+                    }
                     successDiv.classList.add('show');
 
                     // Reset form
@@ -545,8 +540,12 @@ HTML_TEMPLATE = """
 
 
 def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_minus_1, ytd, base_year,
-                              ai_analysis=None, yearly_data=None, raw_data=None):
-    """Creates the complete valuation template with data populated. Returns bytes."""
+                              ai_analysis=None, yearly_data=None, raw_df=None):
+    """Creates the complete valuation template with data populated. Returns bytes.
+    
+    Args:
+        raw_df: The complete original DataFrame from the input file (all columns preserved)
+    """
 
     wb = Workbook()
     ws = wb.active
@@ -1372,30 +1371,52 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
         ws_decay.column_dimensions['F'].width = 12
 
     # =========================================================================
-    # RAW DATA SHEET (if raw data provided)
+    # RAW DATA SHEET (preserve complete input file from Royalty Exchange)
     # =========================================================================
-    if raw_data is not None:
-        ws_raw = wb.create_sheet(title="Raw Data")
-
-        # Write headers
-        for col_idx, col_name in enumerate(raw_data.columns, 1):
-            cell = ws_raw.cell(row=1, column=col_idx, value=col_name)
-            cell.font = Font(bold=True)
-            cell.fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
-
-        # Write data rows
-        for row_idx, row in enumerate(raw_data.itertuples(index=False), 2):
-            for col_idx, value in enumerate(row, 1):
-                ws_raw.cell(row=row_idx, column=col_idx, value=value)
-
-        # Auto-adjust column widths based on content
-        for col_idx, col_name in enumerate(raw_data.columns, 1):
+    if raw_df is not None and not raw_df.empty:
+        ws_raw = wb.create_sheet("Raw Data")
+        
+        # Title
+        ws_raw['A1'] = "COMPLETE RAW DATA FROM ROYALTY EXCHANGE"
+        ws_raw['A1'].font = Font(bold=True, size=14)
+        ws_raw['A2'] = f"Original file preserved - {len(raw_df):,} rows"
+        ws_raw['A2'].font = Font(italic=True, size=10, color="666666")
+        
+        # Write headers starting at row 4
+        header_row = 4
+        for col_idx, col_name in enumerate(raw_df.columns, 1):
+            cell = ws_raw.cell(row=header_row, column=col_idx, value=col_name)
+            cell.font = Font(bold=True, size=10)
+            cell.fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        
+        # Write data starting at row 5
+        for row_idx, row_data in enumerate(raw_df.values, header_row + 1):
+            for col_idx, value in enumerate(row_data, 1):
+                cell = ws_raw.cell(row=row_idx, column=col_idx)
+                # Handle different data types
+                if pd.isna(value):
+                    cell.value = ""
+                elif isinstance(value, (int, float)):
+                    cell.value = value
+                    # Format currency columns
+                    col_name = raw_df.columns[col_idx - 1].lower()
+                    if any(x in col_name for x in ['amount', 'income', 'earnings', 'royalty']):
+                        cell.number_format = '#,##0.00'
+                else:
+                    cell.value = str(value)
+        
+        # Auto-adjust column widths (approximate)
+        for col_idx, col_name in enumerate(raw_df.columns, 1):
             max_length = len(str(col_name))
-            for row_idx in range(2, min(len(raw_data) + 2, 100)):  # Sample first 100 rows
+            # Sample first 100 rows for width calculation
+            for row_idx in range(header_row + 1, min(header_row + 101, len(raw_df) + header_row + 1)):
                 cell_value = ws_raw.cell(row=row_idx, column=col_idx).value
                 if cell_value:
-                    max_length = max(max_length, len(str(cell_value)))
-            ws_raw.column_dimensions[get_column_letter(col_idx)].width = min(max_length + 2, 50)
+                    max_length = max(max_length, min(len(str(cell_value)), 50))
+            ws_raw.column_dimensions[get_column_letter(col_idx)].width = min(max_length + 2, 30)
+        
+        # Freeze header row
+        ws_raw.freeze_panes = ws_raw.cell(row=header_row + 1, column=1)
 
     # Save to bytes
     output = io.BytesIO()
@@ -1404,7 +1425,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     return output
 
 
-def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000, oauth_token=None):
+def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000, api_key=None):
     """Process uploaded CSV and return Excel bytes + filename."""
 
     # Read the file
@@ -1473,7 +1494,7 @@ def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000,
                 yearly_data=yearly_data,
                 base_year=base_year,
                 genre=genre,
-                oauth_token=oauth_token,
+                api_key=api_key,
                 n_simulations=n_simulations
             )
         except Exception as e:
@@ -1493,7 +1514,7 @@ def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000,
 
     output_filename = f"{royalty_name} Valuation.xlsx"
 
-    # Create the valuation
+    # Create the valuation (pass complete raw DataFrame for Raw Data sheet)
     excel_bytes = create_valuation_template(
         royalty_name=royalty_name,
         year_minus_3=year_minus_3,
@@ -1503,7 +1524,7 @@ def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000,
         base_year=base_year,
         ai_analysis=ai_analysis,
         yearly_data=yearly_data,
-        raw_data=df
+        raw_df=df  # Complete original input file
     )
 
     return excel_bytes, output_filename
@@ -1511,8 +1532,7 @@ def process_csv(file_storage, enable_ai=True, genre="mixed", n_simulations=1000,
 
 @app.route('/')
 def index():
-    token_configured = bool(os.environ.get('ANTHROPIC_OAUTH_TOKEN'))
-    return render_template_string(HTML_TEMPLATE, token_configured=token_configured)
+    return render_template_string(HTML_TEMPLATE)
 
 
 @app.route('/process', methods=['POST'])
@@ -1529,15 +1549,33 @@ def process():
         enable_ai = request.form.get('enable_ai') == 'on'
         genre = request.form.get('genre', 'mixed')
         n_simulations = int(request.form.get('simulations', 1000))
-        oauth_token = request.form.get('oauth_token', '').strip() or os.environ.get('ANTHROPIC_OAUTH_TOKEN') or None
+        api_key = request.form.get('api_key', '').strip() or None
 
         excel_bytes, output_filename = process_csv(
             file,
             enable_ai=enable_ai,
             genre=genre,
             n_simulations=n_simulations,
-            oauth_token=oauth_token
+            api_key=api_key
         )
+
+        # Auto-save to Output Sheets folder
+        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Output Sheets")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Add timestamp to avoid overwrites
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = output_filename.replace('.xlsx', '')
+        saved_filename = f"{base_name}_{timestamp}.xlsx"
+        saved_path = os.path.join(output_dir, saved_filename)
+        
+        # Save a copy to the Output Sheets folder
+        excel_bytes.seek(0)
+        with open(saved_path, 'wb') as f:
+            f.write(excel_bytes.read())
+        excel_bytes.seek(0)  # Reset for send_file
+        
+        print(f"  📁 Saved to: {saved_path}")
 
         response = send_file(
             excel_bytes,
@@ -1546,6 +1584,7 @@ def process():
             download_name=output_filename
         )
         response.headers['X-Filename'] = output_filename
+        response.headers['X-Saved-Path'] = saved_path
         return response
 
     except Exception as e:
