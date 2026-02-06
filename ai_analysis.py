@@ -425,6 +425,7 @@ Format your response as JSON with keys: genre, risk_factors, opportunities, scen
         # Run claude CLI with --print flag for non-interactive output
         result = subprocess.run(
             [claude_path, '-p', prompt],
+            stdin=subprocess.DEVNULL,  # Don't wait for stdin
             capture_output=True,
             text=True,
             timeout=120  # 2 minute timeout
