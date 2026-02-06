@@ -384,6 +384,84 @@ def compare_to_industry_benchmark(
     }
 
 
+def call_claude_cli(
+    yearly_data: Dict[int, float],
+    trend_analysis: Dict
+) -> Optional[Dict]:
+    """
+    Call Claude Code CLI for analysis (uses Max plan subscription).
+    Falls back gracefully if CLI not available.
+    """
+    import subprocess
+    import shutil
+    
+    # Check if claude CLI is available
+    claude_path = shutil.which('claude')
+    if not claude_path:
+        return None
+    
+    # Prepare the analysis prompt
+    prompt = f"""Analyze this music royalty catalog data and provide investment insights:
+
+Historical Earnings by Year:
+{json.dumps(yearly_data, indent=2)}
+
+Trend Analysis:
+- CAGR: {trend_analysis.get('cagr', 0):.1%}
+- Volatility: {trend_analysis.get('volatility', 0):.1%}
+- Trend Direction: {trend_analysis.get('trend_direction', 'unknown')}
+- Momentum: {trend_analysis.get('momentum', 'unknown')}
+
+Please provide:
+1. Genre classification (best guess based on earnings pattern)
+2. Key risk factors (list 3-5)
+3. Potential opportunities (list 2-3)
+4. Recommended scenario weights (bear/base/bull as percentages totaling 100%)
+5. A brief narrative summary (2-3 sentences) suitable for an investment memo
+
+Format your response as JSON with keys: genre, risk_factors, opportunities, scenario_weights, narrative"""
+
+    try:
+        # Run claude CLI with --print flag for non-interactive output
+        result = subprocess.run(
+            [claude_path, '-p', prompt],
+            capture_output=True,
+            text=True,
+            timeout=120  # 2 minute timeout
+        )
+        
+        if result.returncode != 0:
+            print(f"Claude CLI error: {result.stderr}")
+            return None
+        
+        response_text = result.stdout.strip()
+        
+        # Try to parse JSON from response
+        try:
+            start = response_text.find('{')
+            end = response_text.rfind('}') + 1
+            if start >= 0 and end > start:
+                return json.loads(response_text[start:end])
+        except json.JSONDecodeError:
+            pass
+        
+        # If no valid JSON, return with narrative
+        return {
+            "genre": "mixed",
+            "risk_factors": ["Market volatility", "Streaming rate changes", "Catalog aging"],
+            "opportunities": ["Sync licensing potential", "Catalog expansion"],
+            "scenario_weights": {"bear": 25, "base": 50, "bull": 25},
+            "narrative": response_text[:500]
+        }
+        
+    except subprocess.TimeoutExpired:
+        print("Claude CLI timeout")
+        return None
+    except Exception as e:
+        print(f"Claude CLI error: {e}")
+        return None
+
+
 def call_claude_api(
     yearly_data: Dict[int, float],
     trend_analysis: Dict,
@@ -391,13 +469,16 @@ def call_claude_api(
 ) -> Optional[Dict]:
     """
     Call Claude API for advanced analysis and narrative generation.
-    Returns None if API key not available.
+    Falls back to Claude CLI if API fails.
+    Returns None if neither available.
     """
     if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_OAUTH_TOKEN")
 
     if not api_key:
-        return None
+        # Try Claude CLI as fallback
+        print("No API key found, trying Claude CLI...")
+        return call_claude_cli(yearly_data, trend_analysis)
 
     try:
         import anthropic
@@ -454,10 +535,14 @@ Format your response as JSON with keys: genre, risk_factors, opportunities, scen
         }
 
     except ImportError:
-        return None
+        # anthropic module not installed, try CLI
+        print("Anthropic module not installed, trying Claude CLI...")
+        return call_claude_cli(yearly_data, trend_analysis)
     except Exception as e:
         print(f"Claude API error: {e}")
-        return None
+        # API failed (auth error, rate limit, etc.), try CLI
+        print("Falling back to Claude CLI...")
+        return call_claude_cli(yearly_data, trend_analysis)
 
 
 def generate_fallback_narrative(
