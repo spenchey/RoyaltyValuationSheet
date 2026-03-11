@@ -22,6 +22,7 @@ class DCFResult:
     discount_factors: list
     ev_multiple: float
     payback_years: float
+    tv_pct_of_ev: float
 
 
 def calculate_dcf(
@@ -51,11 +52,9 @@ def calculate_dcf(
     year_5_cf = cf[5]
     terminal_cf = year_5_cf * (1 + terminal_growth)
 
-    if discount_rate > terminal_growth:
-        terminal_value = terminal_cf / (discount_rate - terminal_growth)
-    else:
-        # Fallback: use multiple
-        terminal_value = year_5_cf * 10
+    # Enforce minimum 3% spread to prevent terminal value blowup
+    effective_spread = max(discount_rate - terminal_growth, 0.03)
+    terminal_value = terminal_cf / effective_spread
 
     # Present value of terminal
     pv_terminal = terminal_value * discount_factors[5]
@@ -133,6 +132,35 @@ def execute(
         bull['enterprise_value'] * scenario_weights['bull']
     )
 
+    # Compute real cumulative payback using base-case projected CFs
+    payback = 0.0
+    if base_year_cf > 0:
+        cumulative = 0.0
+        base_cfs = base['cash_flows']  # [base, yr1, yr2, yr3, yr4, yr5]
+        for i in range(1, len(base_cfs)):
+            cumulative += base_cfs[i]
+            if cumulative >= weighted_value:
+                # Interpolate fractional year
+                overshoot = cumulative - weighted_value
+                payback = i - (overshoot / base_cfs[i]) if base_cfs[i] > 0 else i
+                break
+        else:
+            # Project beyond year 5 using terminal growth
+            yr = len(base_cfs) - 1
+            last_cf = base_cfs[-1]
+            while yr < 20:
+                yr += 1
+                last_cf = last_cf * (1 + terminal_growth)
+                cumulative += last_cf
+                if cumulative >= weighted_value:
+                    overshoot = cumulative - weighted_value
+                    payback = yr - (overshoot / last_cf) if last_cf > 0 else yr
+                    break
+            else:
+                payback = 20.0  # 20+ years
+
+    tv_pct = base['pv_terminal'] / base['enterprise_value'] if base['enterprise_value'] > 0 else 0
+
     return DCFResult(
         bear_value=bear['enterprise_value'],
         base_value=base['enterprise_value'],
@@ -144,5 +172,6 @@ def execute(
         cash_flows=base['cash_flows'],
         discount_factors=base['discount_factors'],
         ev_multiple=weighted_value / base_year_cf if base_year_cf > 0 else 0,
-        payback_years=weighted_value / base_year_cf if base_year_cf > 0 else 0
+        payback_years=payback,
+        tv_pct_of_ev=tv_pct
     )

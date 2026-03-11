@@ -96,6 +96,10 @@ class AIAnalysisResult:
     ai_narrative: str
     risk_factors: List[str]
     opportunities: List[str]
+    haircut_rationale: str = ""
+    momentum: str = "steady"
+    trend_direction: str = "stable"
+    raw_cagr: float = 0.0
 
 
 def analyze_historical_trend(yearly_data: Dict[int, float]) -> Dict:
@@ -121,30 +125,65 @@ def analyze_historical_trend(yearly_data: Dict[int, float]) -> Dict:
             change = (values[i] - values[i-1]) / values[i-1]
             yoy_changes.append(change)
 
-    # Calculate CAGR
+    # Calculate full-period CAGR
     if values[0] > 0 and values[-1] > 0 and len(years) > 1:
-        cagr = (values[-1] / values[0]) ** (1 / (len(years) - 1)) - 1
+        full_cagr = (values[-1] / values[0]) ** (1 / (len(years) - 1)) - 1
     else:
-        cagr = 0
+        full_cagr = 0
+
+    # Calculate recent CAGR (last 3 years) — this is what matters for projections
+    # Full CAGR gets distorted by early ramp-up or distant history
+    if len(values) >= 4:
+        recent_start = values[-4]  # 3 years back from latest
+        recent_end = values[-1]
+        if recent_start > 0 and recent_end > 0:
+            recent_cagr = (recent_end / recent_start) ** (1 / 3) - 1
+        else:
+            recent_cagr = full_cagr
+    elif len(values) >= 3:
+        recent_start = values[-3]
+        recent_end = values[-1]
+        if recent_start > 0 and recent_end > 0:
+            recent_cagr = (recent_end / recent_start) ** (1 / 2) - 1
+        else:
+            recent_cagr = full_cagr
+    else:
+        recent_cagr = full_cagr
+
+    # Use recent CAGR for projections — it reflects where the catalog is NOW
+    cagr = recent_cagr
 
     # Calculate volatility (standard deviation of returns)
     volatility = statistics.stdev(yoy_changes) if len(yoy_changes) > 1 else 0
 
-    # Determine trend direction
-    if cagr > 0.05:
+    # Determine trend direction from recent data, not full history
+    # Use average of last 2-3 YoY changes to avoid single-year noise
+    if len(yoy_changes) >= 2:
+        recent_trend = statistics.mean(yoy_changes[-min(3, len(yoy_changes)):])
+    else:
+        recent_trend = yoy_changes[-1] if yoy_changes else 0
+
+    if recent_trend > 0.05:
         trend_direction = "growing"
-    elif cagr < -0.05:
+    elif recent_trend < -0.02:
         trend_direction = "declining"
     else:
         trend_direction = "stable"
 
     # Check for acceleration/deceleration
-    if len(yoy_changes) >= 2:
-        recent_avg = statistics.mean(yoy_changes[-2:]) if len(yoy_changes) >= 2 else yoy_changes[-1]
-        earlier_avg = statistics.mean(yoy_changes[:-2]) if len(yoy_changes) > 2 else yoy_changes[0]
+    if len(yoy_changes) >= 3:
+        recent_avg = statistics.mean(yoy_changes[-2:])
+        earlier_avg = statistics.mean(yoy_changes[:-2])
         if recent_avg > earlier_avg + 0.03:
             momentum = "accelerating"
         elif recent_avg < earlier_avg - 0.03:
+            momentum = "decelerating"
+        else:
+            momentum = "steady"
+    elif len(yoy_changes) >= 2:
+        if yoy_changes[-1] > yoy_changes[-2] + 0.03:
+            momentum = "accelerating"
+        elif yoy_changes[-1] < yoy_changes[-2] - 0.03:
             momentum = "decelerating"
         else:
             momentum = "steady"
@@ -154,6 +193,7 @@ def analyze_historical_trend(yearly_data: Dict[int, float]) -> Dict:
     return {
         "trend": "analyzed",
         "cagr": cagr,
+        "full_cagr": full_cagr,
         "volatility": volatility,
         "trend_direction": trend_direction,
         "momentum": momentum,
@@ -172,15 +212,36 @@ def suggest_parameters_from_trend(trend_analysis: Dict, base_year_earnings: floa
     trend_direction = trend_analysis.get("trend_direction", "stable")
     momentum = trend_analysis.get("momentum", "steady")
 
-    # Base growth rate suggestion on historical CAGR with adjustments
+    # Base growth rate suggestion on historical CAGR with momentum-aware haircuts
+    haircut = None
+    haircut_rationale = ""
     if trend_direction == "growing":
         # Don't project unsustainable growth
         suggested_growth = min(cagr * 0.7, 0.10)  # Cap at 10%
+        haircut_rationale = f"Growing trend: applied 30% haircut to CAGR ({cagr:.1%}), capped at 10%"
     elif trend_direction == "declining":
-        # Assume some mean reversion
-        suggested_growth = max(cagr * 0.5, -0.05)  # Floor at -5%
+        # Haircut depends on whether decline is stabilizing or accelerating
+        if momentum == "accelerating":
+            # Decline is getting worse — be more conservative
+            haircut = 0.65
+            haircut_rationale = f"Declining + accelerating: 65% haircut (decline worsening)"
+        elif momentum == "decelerating":
+            # Decline is stabilizing — catalog finding its floor
+            haircut = 0.40
+            haircut_rationale = f"Declining + decelerating: 40% haircut (decline stabilizing)"
+        else:
+            haircut = 0.50
+            haircut_rationale = f"Declining + steady momentum: 50% haircut"
+        suggested_growth = max(cagr * (1 - haircut), -0.05)  # Floor at -5%
     else:
-        suggested_growth = cagr * 0.8  # Slight regression to mean
+        # Stable: check if this is a turnaround from negative
+        if cagr > 0 and momentum == "accelerating":
+            # Recent flip to positive — don't fully trust it yet
+            suggested_growth = cagr * 0.4
+            haircut_rationale = f"Stable + recent turnaround: 60% haircut (don't fully trust flip)"
+        else:
+            suggested_growth = cagr * 0.8  # Slight regression to mean
+            haircut_rationale = f"Stable trend: 20% haircut (slight mean reversion)"
 
     # Adjust for momentum
     if momentum == "accelerating":
@@ -220,7 +281,11 @@ def suggest_parameters_from_trend(trend_analysis: Dict, base_year_earnings: floa
         "growth_rate_4_5": round(suggested_growth * 0.6, 4),
         "terminal_rate": round(terminal_rate, 4),
         "discount_rate": round(suggested_discount, 4),
-        "confidence": round(confidence, 2)
+        "confidence": round(confidence, 2),
+        "haircut_rationale": haircut_rationale,
+        "momentum": momentum,
+        "trend_direction": trend_direction,
+        "raw_cagr": cagr
     }
 
 
@@ -231,7 +296,8 @@ def run_monte_carlo_simulation(
     discount_rate: float,
     volatility: float = 0.15,
     n_simulations: int = 1000,
-    projection_years: int = 5
+    projection_years: int = 5,
+    purchase_price: float = 0.0
 ) -> Dict:
     """
     Run Monte Carlo simulation to generate probability-weighted valuations.
@@ -265,13 +331,11 @@ def run_monte_carlo_simulation(
         # Calculate PV of cash flows
         pv_cf = sum(cf[i] / (1 + sim_discount) ** i for i in range(1, projection_years + 1))
 
-        # Terminal value
-        if sim_discount > sim_terminal:
-            terminal_cf = cf[-1] * (1 + sim_terminal)
-            terminal_value = terminal_cf / (sim_discount - sim_terminal)
-            pv_terminal = terminal_value / (1 + sim_discount) ** projection_years
-        else:
-            pv_terminal = cf[-1] * 10  # Fallback multiple
+        # Terminal value with minimum 3% spread guard
+        terminal_cf = cf[-1] * (1 + sim_terminal)
+        effective_spread = max(sim_discount - sim_terminal, 0.03)
+        terminal_value = terminal_cf / effective_spread
+        pv_terminal = terminal_value / (1 + sim_discount) ** projection_years
 
         total_value = pv_cf + pv_terminal
         valuations.append(total_value)
@@ -290,6 +354,18 @@ def run_monte_carlo_simulation(
         "p95": float(np.percentile(valuations, 95)),
     }
 
+    # Risk metrics relative to purchase price
+    risk_metrics = {}
+    if purchase_price > 0:
+        loss_count = np.sum(valuations < purchase_price)
+        risk_metrics['p_loss'] = float(loss_count / n_simulations)
+        risk_metrics['var_95'] = float(purchase_price - percentiles['p5'])
+        worst_5pct = valuations[valuations <= np.percentile(valuations, 5)]
+        if len(worst_5pct) > 0:
+            risk_metrics['expected_shortfall'] = float(purchase_price - np.mean(worst_5pct))
+        else:
+            risk_metrics['expected_shortfall'] = risk_metrics['var_95']
+
     return {
         "mean": float(np.mean(valuations)),
         "median": float(np.median(valuations)),
@@ -300,7 +376,9 @@ def run_monte_carlo_simulation(
         "n_simulations": n_simulations,
         "confidence_interval_90": (percentiles["p5"], percentiles["p95"]),
         "downside_risk": percentiles["p10"],
-        "upside_potential": percentiles["p90"]
+        "upside_potential": percentiles["p90"],
+        "risk_metrics": risk_metrics,
+        "valuations": valuations.tolist()
     }
 
 
@@ -645,7 +723,8 @@ def run_full_analysis(
     base_year: float,
     genre: str = "mixed",
     api_key: Optional[str] = None,
-    n_simulations: int = 1000
+    n_simulations: int = 1000,
+    listing_price: float = 0.0
 ) -> AIAnalysisResult:
     """
     Run complete AI-powered analysis pipeline.
@@ -665,7 +744,8 @@ def run_full_analysis(
         terminal_rate=params["terminal_rate"],
         discount_rate=params["discount_rate"],
         volatility=trend_analysis.get("volatility", 0.15),
-        n_simulations=n_simulations
+        n_simulations=n_simulations,
+        purchase_price=listing_price
     )
 
     # Step 4: Compare to industry benchmarks
@@ -698,5 +778,9 @@ def run_full_analysis(
         scenario_probabilities=scenario_weights,
         ai_narrative=narrative,
         risk_factors=risk_factors,
-        opportunities=opportunities
+        opportunities=opportunities,
+        haircut_rationale=params.get("haircut_rationale", ""),
+        momentum=params.get("momentum", "steady"),
+        trend_direction=params.get("trend_direction", "stable"),
+        raw_cagr=params.get("raw_cagr", 0.0)
     )

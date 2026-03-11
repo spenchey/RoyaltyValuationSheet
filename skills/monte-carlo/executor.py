@@ -16,7 +16,8 @@ def execute(
     volatility: float = 0.15,
     n_simulations: int = 1000,
     projection_years: int = 5,
-    seed: int = 42
+    seed: int = 42,
+    purchase_price: float = 0.0
 ) -> Dict[str, Any]:
     """
     Run Monte Carlo simulation for valuation analysis.
@@ -71,13 +72,11 @@ def execute(
             for i in range(1, projection_years + 1)
         )
 
-        # Terminal value
-        if sim_discount > sim_terminal:
-            terminal_cf = cf[-1] * (1 + sim_terminal)
-            terminal_value = terminal_cf / (sim_discount - sim_terminal)
-            pv_terminal = terminal_value / (1 + sim_discount) ** projection_years
-        else:
-            pv_terminal = cf[-1] * 10  # Fallback multiple
+        # Terminal value with minimum 3% spread guard
+        terminal_cf = cf[-1] * (1 + sim_terminal)
+        effective_spread = max(sim_discount - sim_terminal, 0.03)
+        terminal_value = terminal_cf / effective_spread
+        pv_terminal = terminal_value / (1 + sim_discount) ** projection_years
 
         total_value = pv_cf + pv_terminal
         valuations.append(total_value)
@@ -95,6 +94,18 @@ def execute(
         'p95': float(np.percentile(valuations, 95)),
     }
 
+    # Risk metrics relative to purchase price
+    risk_metrics = {}
+    if purchase_price > 0:
+        loss_count = np.sum(valuations < purchase_price)
+        risk_metrics['p_loss'] = float(loss_count / n_simulations)
+        risk_metrics['var_95'] = float(purchase_price - percentiles['p5'])
+        worst_5pct = valuations[valuations <= np.percentile(valuations, 5)]
+        if len(worst_5pct) > 0:
+            risk_metrics['expected_shortfall'] = float(purchase_price - np.mean(worst_5pct))
+        else:
+            risk_metrics['expected_shortfall'] = risk_metrics['var_95']
+
     return {
         'mean': float(np.mean(valuations)),
         'median': float(np.median(valuations)),
@@ -108,5 +119,7 @@ def execute(
         'confidence_interval_50': (percentiles['p25'], percentiles['p75']),
         'downside_risk': percentiles['p10'],
         'upside_potential': percentiles['p90'],
-        'value_at_risk': percentiles['p50'] - percentiles['p10']
+        'value_at_risk': percentiles['p50'] - percentiles['p10'],
+        'risk_metrics': risk_metrics,
+        'valuations': valuations.tolist()
     }

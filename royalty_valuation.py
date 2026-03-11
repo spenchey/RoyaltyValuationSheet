@@ -14,6 +14,7 @@ from datetime import datetime
 import os
 import sys
 import re
+import statistics
 
 # Try to import AI analysis module
 try:
@@ -28,7 +29,8 @@ except ImportError:
 
 
 def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_minus_1, ytd, base_year,
-                              output_path, ai_analysis=None, yearly_data=None, raw_data=None):
+                              output_path, ai_analysis=None, yearly_data=None, raw_data=None,
+                              base_year_method=None, non_recurring_info=None, listing_price=0):
     """Creates the complete valuation template with data populated."""
 
     wb = Workbook()
@@ -65,6 +67,13 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['B5'].fill = input_fill
     ws['C5'] = "<- Edit"
     ws['C5'].font = edit_font
+
+    ws['A6'] = "Listing Price"
+    ws['B6'] = listing_price if listing_price > 0 else 0
+    ws['B6'].fill = input_fill
+    ws['B6'].number_format = '$#,##0.00'
+    ws['C6'] = "<- Enter listing/bid price for IRR, payback & risk"
+    ws['C6'].font = edit_font
 
     ws['A7'] = "HISTORICAL ROYALTIES"
     ws['A7'].font = header_font
@@ -106,8 +115,17 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['B13'] = base_year
     ws['B13'].fill = input_fill
     ws['B13'].number_format = '#,##0.00'
-    ws['C13'] = "<- Edit (normalized starting CF)"
+    base_year_note = "<- Edit (normalized starting CF)"
+    if base_year_method:
+        base_year_note += f"  [{base_year_method}]"
+    ws['C13'] = base_year_note
     ws['C13'].font = edit_font
+
+    # Non-recurring income note
+    if non_recurring_info and non_recurring_info.get('amount', 0) > 0:
+        nr_years = ', '.join(str(f['year']) for f in non_recurring_info.get('flagged_years', []))
+        ws['D13'] = f"${non_recurring_info['amount']:,.0f} non-recurring removed from year(s) {nr_years}"
+        ws['D13'].font = Font(italic=True, color="CC0000", size=9)
 
     # ============================================================================
     # KEY ASSUMPTIONS - With AI suggestions if available
@@ -233,7 +251,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
 
     ws['E13'] = "Terminal Value"
     for col, c in [('F', 'F'), ('G', 'G'), ('H', 'H')]:
-        ws[f'{col}13'] = f"={c}12*(1+{c}10)/({c}9-{c}10)"
+        ws[f'{col}13'] = f"=IFERROR({c}12*(1+{c}10)/MAX({c}9-{c}10,0.03),{c}12*10)"
         ws[f'{col}13'].number_format = '#,##0.00'
 
     ws['E14'] = "PV of Terminal"
@@ -318,9 +336,155 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['F26'] = "=F24/B13"
     ws['F26'].number_format = '0.0x'
 
-    ws['E27'] = "Payback Period (years)"
-    ws['F27'] = "=F24/B13"
-    ws['F27'].number_format = '0.0'
+    # (TV dominance warning placed in Valuation Summary section below)
+
+    # ============================================================================
+    # INVESTOR METRICS (at listing price) — fully formula-based, reactive to B6
+    # ============================================================================
+    highlight_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    warning_font = Font(bold=True, color="CC0000")
+
+    ws['E29'] = "INVESTOR METRICS (at Listing Price)"
+    ws['E29'].font = Font(bold=True, size=13)
+    ws['E29'].fill = highlight_fill
+
+    ws['E30'] = "Listing Price"
+    ws['E30'].font = header_font
+    ws['F30'] = "=B6"
+    ws['F30'].number_format = '$#,##0'
+    ws['F30'].fill = input_fill
+    ws['G30'] = "<- Edit B6"
+    ws['G30'].font = edit_font
+
+    # Cash-on-cash yield (Problem 6)
+    ws['E31'] = "Year 1 Cash Yield"
+    ws['F31'] = '=IF(B6>0,C24/B6,"-")'
+    ws['F31'].number_format = '0.0%'
+    ws['G31'] = '=IF(AND(B6>0,C24/B6>0.08),"Strong yield",IF(AND(B6>0,C24/B6<0.04),"Low yield",""))'
+    ws['G31'].font = Font(italic=True, color="666666", size=9)
+
+    ws['E32'] = "Year 3 Cash Yield"
+    ws['F32'] = '=IF(B6>0,E24/B6,"-")'
+    ws['F32'].number_format = '0.0%'
+
+    ws['E33'] = "Year 5 Cash Yield"
+    ws['F33'] = '=IF(B6>0,G24/B6,"-")'
+    ws['F33'].number_format = '0.0%'
+
+    # Payback period (Problem 4)
+    ws['E35'] = "Payback Period (years)"
+    ws['E35'].font = header_font
+    ws['F35'] = (
+        '=IF(B6<=0,"-",'
+        'IF(C24>=B6,1,'
+        'IF(C24+D24>=B6,1+(B6-C24)/D24,'
+        'IF(C24+D24+E24>=B6,2+(B6-C24-D24)/E24,'
+        'IF(C24+D24+E24+F24>=B6,3+(B6-C24-D24-E24)/F24,'
+        'IF(C24+D24+E24+F24+G24>=B6,4+(B6-C24-D24-E24-F24)/G24,'
+        '"5+"))))))'
+    )
+    ws['F35'].number_format = '0.0'
+
+    # IRR — uses helper rows with individual cell references (universal Excel compat)
+    # The IRR() array constant syntax {-B6,...} fails in many Excel versions.
+    # Instead: lay out cash flows in a hidden helper row, then IRR(range).
+
+    # Helper rows for IRR cash flows — placed in columns J-O (out of main view)
+    # Row 38: Base case CFs, Row 39: Bear, Row 40: Bull
+    helper_col_start = 'J'  # J through O = 6 cells (yr0 through yr4+exit)
+    helper_cols = ['J', 'K', 'L', 'M', 'N']  # 5 cells: -price, cf1, cf2, cf3, cf4+exit
+
+    # Labels
+    ws['J37'] = "IRR Helper (Base)"
+    ws['J37'].font = Font(italic=True, color="999999", size=8)
+
+    # --- Base case helper (row 38) ---
+    ws['J38'] = "=-B6"                                          # -purchase price
+    ws['K38'] = "=B13*(1+B16)"                                  # Year 1
+    ws['L38'] = "=B13*(1+B16)^2"                                # Year 2
+    ws['M38'] = "=B13*(1+B16)^3*(1+B17)"                       # Year 3 (transition to phase 2)
+    # Year 4 + exit value (year 4 CF + PV of all future CFs as terminal)
+    ws['N38'] = ("=B13*(1+B16)^3*(1+B17)^2"
+                 "+B13*(1+B16)^3*(1+B17)^2*(1+B19)/MAX(B18-B19,0.03)/(1+B18)^5")
+
+    # --- Bear case helper (row 39) ---
+    ws['J39'] = "=-B6"
+    ws['K39'] = "=B13*0.9*(1+(B16-0.02))"
+    ws['L39'] = "=B13*0.9*(1+(B16-0.02))^2"
+    ws['M39'] = "=B13*0.9*(1+(B16-0.02))^3*(1+(B17-0.01))"
+    ws['N39'] = ("=B13*0.9*(1+(B16-0.02))^3*(1+(B17-0.01))^2"
+                 "+B13*0.9*(1+(B16-0.02))^3*(1+(B17-0.01))^2*(1+(B19-0.02))/MAX((B18+0.02)-(B19-0.02),0.03)/(1+(B18+0.02))^5")
+
+    # --- Bull case helper (row 40) ---
+    ws['J40'] = "=-B6"
+    ws['K40'] = "=B13*1.1*(1+(B16+0.03))"
+    ws['L40'] = "=B13*1.1*(1+(B16+0.03))^2"
+    ws['M40'] = "=B13*1.1*(1+(B16+0.03))^3*(1+(B17+0.02))"
+    ws['N40'] = ("=B13*1.1*(1+(B16+0.03))^3*(1+(B17+0.02))^2"
+                 "+B13*1.1*(1+(B16+0.03))^3*(1+(B17+0.02))^2*(1+(B19+0.02))/MAX(B18-(B19+0.02),0.03)/(1+B18)^5")
+
+    # Hide helper columns
+    for c in ['J', 'K', 'L', 'M', 'N']:
+        ws.column_dimensions[c].hidden = True
+
+    # --- Visible IRR section ---
+    ws['E37'] = "IRR at Listing Price"
+    ws['E37'].font = Font(bold=True, size=12)
+    ws['E37'].fill = highlight_fill
+
+    ws['E38'] = "Base Case IRR"
+    ws['E38'].font = header_font
+    ws['F38'] = '=IF(B6<=0,"-",IFERROR(IRR(J38:N38),"-"))'
+    ws['F38'].number_format = '0.0%'
+    ws['F38'].font = Font(bold=True, size=12)
+
+    ws['E39'] = "Bear Case IRR"
+    ws['F39'] = '=IF(B6<=0,"-",IFERROR(IRR(J39:N39),"-"))'
+    ws['F39'].number_format = '0.0%'
+    ws['F39'].fill = scenario_bear_fill
+
+    ws['E40'] = "Bull Case IRR"
+    ws['F40'] = '=IF(B6<=0,"-",IFERROR(IRR(J40:N40),"-"))'
+    ws['F40'].number_format = '0.0%'
+    ws['F40'].fill = scenario_bull_fill
+
+    ws['E41'] = "Ref: 10yr Treasury ~4.3%, S&P div yield ~1.3%"
+    ws['E41'].font = Font(italic=True, color="666666", size=9)
+
+    # Breakeven decay rate (Problem 7) — Python-computed, written as value
+    ws['E43'] = "MARGIN OF SAFETY"
+    ws['E43'].font = Font(bold=True, size=12)
+    ws['E43'].fill = highlight_fill
+
+    if listing_price > 0 and base_year > 0:
+        irr_data = compute_irr_and_breakeven(
+            base_year_cf=base_year,
+            growth_1_3=0.05, growth_4_5=0.03,
+            discount_rate=0.12, terminal_growth=-0.05,
+            listing_price=listing_price
+        )
+        if 'breakeven_decay' in irr_data:
+            ws['E44'] = "Breakeven growth rate"
+            ws['E44'].font = header_font
+            ws['F44'] = irr_data['breakeven_decay']
+            ws['F44'].number_format = '0.0%'
+            ws['G44'] = "Growth rate where NPV = listing price"
+            ws['G44'].font = Font(italic=True, color="666666", size=9)
+
+            if 'margin_of_safety' in irr_data:
+                ws['E45'] = "Margin of Safety"
+                ws['E45'].font = header_font
+                ws['F45'] = abs(irr_data['margin_of_safety'])
+                ws['F45'].number_format = '0.0'
+                ws['F45'].font = Font(bold=True, size=12)
+                ws['G45'] = "percentage points of cushion"
+                ws['G45'].font = Font(italic=True, color="666666", size=9)
+        else:
+            ws['E44'] = "Could not compute breakeven (enter listing price & re-run)"
+            ws['E44'].font = Font(italic=True, color="666666")
+    else:
+        ws['E44'] = "Re-run tool with listing price to compute breakeven"
+        ws['E44'].font = Font(italic=True, color="666666")
 
     # ============================================================================
     # 5-YEAR DCF PROJECTION
@@ -383,9 +547,9 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['A30'].font = section_font
 
     ws['A31'] = "Terminal Value (undiscounted)"
-    ws['B31'] = "=H24/($B$18-$B$19)"
+    ws['B31'] = "=IFERROR(H24/MAX($B$18-$B$19,0.03),H24*10)"
     ws['B31'].number_format = '#,##0.00'
-    ws['C31'] = "Gordon Growth formula"
+    ws['C31'] = "Gordon Growth (min 3% spread guard)"
     ws['C31'].font = Font(italic=True, color="666666")
 
     ws['A32'] = "PV of Terminal Value"
@@ -412,29 +576,34 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     ws['A39'] = "% from Terminal Value"
     ws['B39'] = "=B35/B36"
     ws['B39'].number_format = '0.0%'
+    ws['C39'] = '=IF(B39>0.65,"Warning: TV dominates valuation — sensitive to long-term assumptions","")'
+    ws['C39'].font = Font(italic=True, color="CC0000")
 
     # ============================================================================
     # SENSITIVITY ANALYSIS 1
     # ============================================================================
-    ws['A41'] = "SENSITIVITY: Discount Rate vs Growth Rate (Years 1-3)"
-    ws['A41'].font = section_font
+    # Sensitivity tables start row — pushed down to avoid investor metrics overlap
+    sens1_start = 48
 
-    ws['A42'] = "Enterprise Value"
-    ws['C42'] = "Growth Rate (Years 1-3)"
-    ws['C42'].font = header_font
+    ws[f'A{sens1_start}'] = "SENSITIVITY: Discount Rate vs Growth Rate (Years 1-3)"
+    ws[f'A{sens1_start}'].font = section_font
+
+    ws[f'A{sens1_start+1}'] = "Enterprise Value"
+    ws[f'C{sens1_start+1}'] = "Growth Rate (Years 1-3)"
+    ws[f'C{sens1_start+1}'].font = header_font
 
     growth_rates = [0.00, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12]
     for i, gr in enumerate(growth_rates):
         col = get_column_letter(i + 3)
-        ws[f'{col}43'] = gr
-        ws[f'{col}43'].number_format = '0%'
-        ws[f'{col}43'].font = header_font
-        ws[f'{col}43'].alignment = Alignment(horizontal='center')
+        ws[f'{col}{sens1_start+2}'] = gr
+        ws[f'{col}{sens1_start+2}'].number_format = '0%'
+        ws[f'{col}{sens1_start+2}'].font = header_font
+        ws[f'{col}{sens1_start+2}'].alignment = Alignment(horizontal='center')
 
-    ws['A44'] = "Discount"
+    ws[f'A{sens1_start+3}'] = "Discount"
     discount_rates = [0.08, 0.10, 0.12, 0.14, 0.16, 0.18]
     for i, dr in enumerate(discount_rates):
-        row = 44 + i
+        row = sens1_start + 3 + i
         ws[f'B{row}'] = dr
         ws[f'B{row}'].number_format = '0%'
         ws[f'B{row}'].font = header_font
@@ -442,39 +611,41 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
         for j in range(len(growth_rates)):
             col = get_column_letter(j + 3)
             formula = (
-                f"=($B$13*(1+{col}$43)^3*(1+$B$17)^2*(1+$B$19)/($B{row}-$B$19))/(1+$B{row})^5"
+                f"=($B$13*(1+{col}${sens1_start+2})^3*(1+$B$17)^2*(1+$B$19)/MAX($B{row}-$B$19,0.03))/(1+$B{row})^5"
                 f"+$B$13/(1+$B{row})"
-                f"+$B$13*(1+{col}$43)/(1+$B{row})^2"
-                f"+$B$13*(1+{col}$43)^2/(1+$B{row})^3"
-                f"+$B$13*(1+{col}$43)^3*(1+$B$17)/(1+$B{row})^4"
-                f"+$B$13*(1+{col}$43)^3*(1+$B$17)^2/(1+$B{row})^5"
+                f"+$B$13*(1+{col}${sens1_start+2})/(1+$B{row})^2"
+                f"+$B$13*(1+{col}${sens1_start+2})^2/(1+$B{row})^3"
+                f"+$B$13*(1+{col}${sens1_start+2})^3*(1+$B$17)/(1+$B{row})^4"
+                f"+$B$13*(1+{col}${sens1_start+2})^3*(1+$B$17)^2/(1+$B{row})^5"
             )
             ws[f'{col}{row}'] = formula
             ws[f'{col}{row}'].number_format = '#,##0'
 
-    ws['A45'] = "Rate"
+    ws[f'A{sens1_start+4}'] = "Rate"
 
     # ============================================================================
     # SENSITIVITY ANALYSIS 2
     # ============================================================================
-    ws['A52'] = "SENSITIVITY: Discount Rate vs Terminal Growth Rate"
-    ws['A52'].font = section_font
+    sens2_start = sens1_start + 11
 
-    ws['A53'] = "Enterprise Value"
-    ws['C53'] = "Terminal Growth Rate"
-    ws['C53'].font = header_font
+    ws[f'A{sens2_start}'] = "SENSITIVITY: Discount Rate vs Terminal Growth Rate"
+    ws[f'A{sens2_start}'].font = section_font
+
+    ws[f'A{sens2_start+1}'] = "Enterprise Value"
+    ws[f'C{sens2_start+1}'] = "Terminal Growth Rate"
+    ws[f'C{sens2_start+1}'].font = header_font
 
     term_growth_rates = [-0.10, -0.07, -0.05, -0.03, 0.00, 0.02, 0.03]
     for i, tg in enumerate(term_growth_rates):
         col = get_column_letter(i + 3)
-        ws[f'{col}54'] = tg
-        ws[f'{col}54'].number_format = '0%'
-        ws[f'{col}54'].font = header_font
-        ws[f'{col}54'].alignment = Alignment(horizontal='center')
+        ws[f'{col}{sens2_start+2}'] = tg
+        ws[f'{col}{sens2_start+2}'].number_format = '0%'
+        ws[f'{col}{sens2_start+2}'].font = header_font
+        ws[f'{col}{sens2_start+2}'].alignment = Alignment(horizontal='center')
 
-    ws['A55'] = "Discount"
+    ws[f'A{sens2_start+3}'] = "Discount"
     for i, dr in enumerate(discount_rates):
-        row = 55 + i
+        row = sens2_start + 3 + i
         ws[f'B{row}'] = dr
         ws[f'B{row}'].number_format = '0%'
         ws[f'B{row}'].font = header_font
@@ -482,7 +653,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
         for j in range(len(term_growth_rates)):
             col = get_column_letter(j + 3)
             formula = (
-                f"=($B$13*(1+$B$16)^3*(1+$B$17)^2*(1+{col}$54)/($B{row}-{col}$54))/(1+$B{row})^5"
+                f"=($B$13*(1+$B$16)^3*(1+$B$17)^2*(1+{col}${sens2_start+2})/MAX($B{row}-{col}${sens2_start+2},0.03))/(1+$B{row})^5"
                 f"+$B$13/(1+$B{row})"
                 f"+$B$13*(1+$B$16)/(1+$B{row})^2"
                 f"+$B$13*(1+$B$16)^2/(1+$B{row})^3"
@@ -492,26 +663,28 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
             ws[f'{col}{row}'] = formula
             ws[f'{col}{row}'].number_format = '#,##0'
 
-    ws['A56'] = "Rate"
+    ws[f'A{sens2_start+4}'] = "Rate"
 
     # ============================================================================
     # MODEL NOTES
     # ============================================================================
-    ws['A62'] = "MODEL NOTES"
-    ws['A62'].font = section_font
+    notes_start = sens2_start + 11
+    ws[f'A{notes_start}'] = "MODEL NOTES"
+    ws[f'A{notes_start}'].font = section_font
 
     notes = [
         "* Green cells are INPUT cells - edit these with your royalty data",
+        "* Enter a Listing Price (B6) — IRR, payback, and yield update automatically",
         "* Purple cells show AI-suggested values (for reference)",
-        "* Royalties = pure cash flow (no costs modeled)",
-        "* Terminal Value = Year 5 CF x (1+g) / (r-g) using Gordon Growth Model",
-        "* Two-phase growth: Years 1-3 near-term, Years 4-5 mature growth",
-        "* Weighted Valuation combines Bear/Base/Bull using your probability weights",
+        "* Base Year is adaptively selected: stable=recent year, volatile=weighted avg or median",
+        "* Non-recurring income (sync spikes, catch-ups) is detected and removed from base year",
+        "* Terminal Value uses Gordon Growth with min 3% spread guard to prevent blowup",
+        "* Breakeven decay rate requires re-running the tool with a listing price",
         "* Sensitivity tables show impact of key assumption changes"
     ]
     for i, note in enumerate(notes):
-        ws[f'A{63+i}'] = note
-        ws[f'A{63+i}'].font = Font(size=10, color="666666")
+        ws[f'A{notes_start+1+i}'] = note
+        ws[f'A{notes_start+1+i}'].font = Font(size=10, color="666666")
 
     # Column widths
     ws.column_dimensions['A'].width = 28
@@ -559,7 +732,7 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
         ws_ai['B11'].number_format = '0.0%'
         ws_ai['B11'].fill = ai_fill
         ws_ai['C11'] = f"{ai_analysis.confidence_score:.0%}"
-        ws_ai['D11'] = "Based on historical CAGR with mean reversion"
+        ws_ai['D11'] = ai_analysis.haircut_rationale if ai_analysis.haircut_rationale else "Based on historical CAGR with mean reversion"
 
         ws_ai['A12'] = "Growth Rate (Yr 4-5)"
         ws_ai['B12'] = ai_analysis.suggested_growth_rate * 0.6
@@ -582,19 +755,34 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
         ws_ai['C14'] = f"{ai_analysis.confidence_score:.0%}"
         ws_ai['D14'] = "Risk-adjusted based on volatility"
 
-        # Risk Factors
-        ws_ai['A16'] = "RISK FACTORS"
+        # Growth Rate Methodology
+        ws_ai['A16'] = "GROWTH RATE METHODOLOGY"
         ws_ai['A16'].font = section_font
+        ws_ai['A17'] = "Recent CAGR (3yr)"
+        ws_ai['B17'] = ai_analysis.raw_cagr
+        ws_ai['B17'].number_format = '0.0%'
+        ws_ai['A18'] = "Trend Direction"
+        ws_ai['B18'] = ai_analysis.trend_direction.capitalize()
+        ws_ai['A19'] = "Momentum"
+        ws_ai['B19'] = ai_analysis.momentum.capitalize()
+        ws_ai['A20'] = "Haircut Applied"
+        ws_ai.merge_cells('B20:D20')
+        ws_ai['B20'] = ai_analysis.haircut_rationale
+        ws_ai['B20'].font = Font(italic=True, size=9)
+
+        # Risk Factors
+        ws_ai['A22'] = "RISK FACTORS"
+        ws_ai['A22'].font = section_font
         for i, risk in enumerate(ai_analysis.risk_factors[:5]):
-            ws_ai[f'A{17+i}'] = f"- {risk}"
-            ws_ai[f'A{17+i}'].font = Font(color="CC0000")
+            ws_ai[f'A{23+i}'] = f"- {risk}"
+            ws_ai[f'A{23+i}'].font = Font(color="CC0000")
 
         # Opportunities
-        ws_ai['A23'] = "OPPORTUNITIES"
-        ws_ai['A23'].font = section_font
+        ws_ai['A29'] = "OPPORTUNITIES"
+        ws_ai['A29'].font = section_font
         for i, opp in enumerate(ai_analysis.opportunities[:4]):
-            ws_ai[f'A{24+i}'] = f"- {opp}"
-            ws_ai[f'A{24+i}'].font = Font(color="006600")
+            ws_ai[f'A{30+i}'] = f"- {opp}"
+            ws_ai[f'A{30+i}'].font = Font(color="006600")
 
         # Column widths
         ws_ai.column_dimensions['A'].width = 24
@@ -685,10 +873,49 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
         ws_mc['D19'] = percentiles['p90']
         ws_mc['D19'].number_format = '$#,##0'
 
+        # Write raw simulation valuations to a hidden sheet for formula-based risk metrics
+        valuations = mc.get('valuations', [])
+        n_sims = len(valuations)
+        if n_sims > 0:
+            ws_mc_data = wb.create_sheet("MC_Data")
+            ws_mc_data.sheet_state = 'hidden'
+            for idx, val in enumerate(valuations, start=1):
+                ws_mc_data.cell(row=idx, column=1, value=val)
+            data_range = f"MC_Data!$A$1:$A${n_sims}"
+
+        # Risk metrics at listing price (Problem 8) — formula-driven from raw simulations
+        ws_mc['A21'] = "RISK METRICS (at Listing Price)"
+        ws_mc['A21'].font = section_font
+
+        ws_mc['A22'] = "Listing Price"
+        ws_mc['B22'] = "='Valuation Model'!B6"
+        ws_mc['B22'].number_format = '$#,##0'
+
+        if n_sims > 0:
+            ws_mc['A23'] = "Probability of Loss"
+            ws_mc['B23'] = f'=IF(\'Valuation Model\'!B6<=0,"-",COUNTIF({data_range},"<"&\'Valuation Model\'!B6)/{n_sims})'
+            ws_mc['B23'].number_format = '0.0%'
+            ws_mc['B23'].font = Font(bold=True)
+
+            ws_mc['A24'] = "Value at Risk (95%)"
+            ws_mc['B24'] = f'=IF(\'Valuation Model\'!B6<=0,"-",\'Valuation Model\'!B6-PERCENTILE({data_range},0.05))'
+            ws_mc['B24'].number_format = '$#,##0'
+            ws_mc['C24'] = "Max loss in 95% of scenarios"
+            ws_mc['C24'].font = Font(italic=True, color="666666", size=9)
+
+            ws_mc['A25'] = "Expected Shortfall (CVaR)"
+            ws_mc['B25'] = f'=IF(\'Valuation Model\'!B6<=0,"-",\'Valuation Model\'!B6-AVERAGEIF({data_range},"<="&PERCENTILE({data_range},0.05)))'
+            ws_mc['B25'].number_format = '$#,##0'
+            ws_mc['C25'] = "Avg loss in worst 5% of scenarios"
+            ws_mc['C25'].font = Font(italic=True, color="666666", size=9)
+        else:
+            ws_mc['A23'] = "No simulation data available"
+            ws_mc['A23'].font = Font(italic=True, color="999999")
+
         # Column widths
-        ws_mc.column_dimensions['A'].width = 24
+        ws_mc.column_dimensions['A'].width = 26
         ws_mc.column_dimensions['B'].width = 16
-        ws_mc.column_dimensions['C'].width = 6
+        ws_mc.column_dimensions['C'].width = 32
         ws_mc.column_dimensions['D'].width = 14
 
     # =========================================================================
@@ -759,22 +986,16 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     # =========================================================================
     if raw_data is not None:
         ws_raw = wb.create_sheet(title="Raw Data")
-
-        # Write headers
         for col_idx, col_name in enumerate(raw_data.columns, 1):
             cell = ws_raw.cell(row=1, column=col_idx, value=col_name)
             cell.font = Font(bold=True)
             cell.fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
-
-        # Write data rows
         for row_idx, row in enumerate(raw_data.itertuples(index=False), 2):
             for col_idx, value in enumerate(row, 1):
                 ws_raw.cell(row=row_idx, column=col_idx, value=value)
-
-        # Auto-adjust column widths based on content
         for col_idx, col_name in enumerate(raw_data.columns, 1):
             max_length = len(str(col_name))
-            for row_idx in range(2, min(len(raw_data) + 2, 100)):  # Sample first 100 rows
+            for row_idx in range(2, min(len(raw_data) + 2, 100)):
                 cell_value = ws_raw.cell(row=row_idx, column=col_idx).value
                 if cell_value:
                     max_length = max(max_length, len(str(cell_value)))
@@ -784,7 +1005,182 @@ def create_valuation_template(royalty_name, year_minus_3, year_minus_2, year_min
     return output_path
 
 
-def process_royalty_file(csv_path, genre="mixed"):
+def detect_one_time_payments(df, year_col, amount_col, yearly):
+    """
+    Detect non-recurring income spikes using median + 2*MAD.
+    Returns (adjusted_yearly, non_recurring_info).
+    """
+    values = yearly.values
+    if len(values) < 3:
+        return yearly, None
+
+    med = float(statistics.median(values))
+    deviations = [abs(v - med) for v in values]
+    mad = float(statistics.median(deviations)) if len(deviations) > 0 else 0
+
+    if mad == 0:
+        return yearly, None
+
+    threshold = med + 2 * mad
+    flagged_years = []
+    total_flagged = 0
+
+    # Check for payment-type column (some CSVs have sync/mechanical/performance)
+    type_col = None
+    for col in df.columns:
+        if col.lower() in ('type', 'payment_type', 'income_type', 'royalty_type', 'source_type'):
+            type_col = col
+            break
+
+    adjusted_yearly = yearly.copy()
+    for year in yearly.index:
+        year_total = float(yearly[year])
+        if year_total > threshold:
+            excess = year_total - med
+            reason = f"Year {int(year)}: ${excess:,.0f} above median (threshold: ${threshold:,.0f})"
+
+            # If we have a type column, check for sync income
+            if type_col is not None:
+                year_mask = df[year_col] == year
+                sync_mask = df[type_col].str.lower().str.contains('sync', na=False)
+                sync_amount = float(df.loc[year_mask & sync_mask, amount_col].sum())
+                if sync_amount > 0:
+                    excess = sync_amount
+                    reason = f"Year {int(year)}: ${sync_amount:,.0f} sync income identified"
+
+            flagged_years.append({'year': int(year), 'amount': excess, 'reason': reason})
+            total_flagged += excess
+            adjusted_yearly[year] = year_total - excess
+
+    if not flagged_years:
+        return yearly, None
+
+    return adjusted_yearly, {
+        'amount': total_flagged,
+        'original': float(yearly[yearly.index[-1]]) if len(yearly) > 0 else 0,
+        'flagged_years': flagged_years,
+        'reason': '; '.join(f['reason'] for f in flagged_years)
+    }
+
+
+def select_base_year(year_minus_1, year_minus_2, year_minus_3, ytd):
+    """
+    Adaptive base year selection based on coefficient of variation.
+    Returns (base_year_value, method_description).
+    """
+    # Collect available full years
+    full_years = [v for v in [year_minus_3, year_minus_2, year_minus_1] if v > 0]
+
+    if len(full_years) == 0:
+        return (ytd if ytd > 0 else 0), "YTD (no full years available)"
+
+    if len(full_years) == 1:
+        return full_years[0], "Most recent year (only 1 year available)"
+
+    mean_val = statistics.mean(full_years)
+    if mean_val == 0:
+        return year_minus_1 if year_minus_1 > 0 else ytd, "Most recent year"
+
+    std_val = statistics.stdev(full_years) if len(full_years) > 1 else 0
+    cv = std_val / mean_val
+
+    if cv < 0.15:
+        # Stable: use most recent year
+        return year_minus_1, f"Most recent year (CV={cv:.2f}, stable)"
+    elif cv <= 0.40:
+        # Moderate volatility: 3-year weighted average (50/30/20)
+        if len(full_years) == 3:
+            weighted = year_minus_1 * 0.50 + year_minus_2 * 0.30 + year_minus_3 * 0.20
+        else:
+            weighted = year_minus_1 * 0.60 + year_minus_2 * 0.40
+        return weighted, f"Weighted avg (CV={cv:.2f}, moderate volatility)"
+    else:
+        # High volatility: 3-year median
+        return statistics.median(full_years), f"Median (CV={cv:.2f}, high volatility)"
+
+
+def compute_irr_and_breakeven(base_year_cf, growth_1_3, growth_4_5, discount_rate,
+                               terminal_growth, listing_price):
+    """
+    Compute IRR at listing price and breakeven decay rate.
+    Returns dict with irr_bear, irr_base, irr_bull, breakeven_decay, margin_of_safety.
+    """
+    result = {}
+
+    if listing_price <= 0 or base_year_cf <= 0:
+        return result
+
+    # Project base-case cash flows
+    def project_cfs(base_cf, g13, g45):
+        cfs = [base_cf]
+        for yr in range(1, 6):
+            if yr <= 3:
+                cfs.append(cfs[-1] * (1 + g13))
+            else:
+                cfs.append(cfs[-1] * (1 + g45))
+        return cfs
+
+    def compute_npv_at_growth(g, base_cf, dr, tg):
+        """NPV with uniform growth rate g for years 1-5."""
+        cfs = [base_cf]
+        for yr in range(1, 6):
+            cfs.append(cfs[-1] * (1 + g))
+        pv_cfs = sum(cfs[i] / (1 + dr) ** i for i in range(1, 6))
+        spread = max(dr - tg, 0.03)
+        tv = cfs[5] * (1 + tg) / spread
+        pv_tv = tv / (1 + dr) ** 5
+        return pv_cfs + pv_tv
+
+    # IRR computation
+    try:
+        import numpy_financial as npf
+
+        scenarios = {
+            'bear': (base_year_cf * 0.9, growth_1_3 - 0.02, growth_4_5 - 0.01,
+                     discount_rate + 0.02, terminal_growth - 0.02),
+            'base': (base_year_cf, growth_1_3, growth_4_5, discount_rate, terminal_growth),
+            'bull': (base_year_cf * 1.1, growth_1_3 + 0.03, growth_4_5 + 0.02,
+                     discount_rate, terminal_growth + 0.02),
+        }
+
+        for scenario_name, (bcf, g13, g45, dr, tg) in scenarios.items():
+            cfs = project_cfs(bcf, g13, g45)
+            # Terminal value as PV of remaining CFs after year 5
+            spread = max(dr - tg, 0.03)
+            tv = cfs[5] * (1 + tg) / spread
+            pv_remaining = tv / (1 + dr) ** 5
+            # IRR cash flow array: [-price, cf1, cf2, cf3, cf4, cf5 + pv_remaining_terminal]
+            irr_cfs = [-listing_price] + cfs[1:5] + [cfs[5] + pv_remaining]
+            try:
+                irr_val = float(npf.irr(irr_cfs))
+                if not (irr_val != irr_val):  # check NaN
+                    result[f'irr_{scenario_name}'] = irr_val
+            except Exception:
+                pass
+    except ImportError:
+        pass
+
+    # Breakeven decay rate (Problem 7)
+    try:
+        from scipy.optimize import brentq
+
+        def npv_minus_price(g):
+            return compute_npv_at_growth(g, base_year_cf, discount_rate, terminal_growth) - listing_price
+
+        # Search for growth rate where NPV = listing price
+        try:
+            breakeven = brentq(npv_minus_price, -0.50, 0.50, xtol=1e-6)
+            result['breakeven_decay'] = breakeven
+            result['margin_of_safety'] = growth_1_3 - breakeven
+        except ValueError:
+            pass
+    except ImportError:
+        pass
+
+    return result
+
+
+def process_royalty_file(csv_path, genre="mixed", listing_price=0):
     """Process a royalty CSV file and create a valuation spreadsheet."""
 
     # Read the CSV
@@ -828,29 +1224,54 @@ def process_royalty_file(csv_path, genre="mixed"):
     year_minus_2 = yearly.get(current_year - 2, 0)
     year_minus_3 = yearly.get(current_year - 3, 0)
 
-    # If no current year data, shift
+    # If no current year data, shift to most recent available
+    shifted = False
     if ytd == 0 and years_list:
+        shifted = True
         latest = max(years_list)
         ytd = yearly.get(latest, 0)
         year_minus_1 = yearly.get(latest - 1, 0)
         year_minus_2 = yearly.get(latest - 2, 0)
         year_minus_3 = yearly.get(latest - 3, 0)
 
-    # Base year = most recent full year
-    base_year = year_minus_1 if year_minus_1 > 0 else ytd
+    # Detect one-time payments (Problem 2)
+    adjusted_yearly, non_recurring_info = detect_one_time_payments(df, year_col, amount_col, yearly)
 
-    # Convert yearly data to dict for AI analysis
-    yearly_data = {int(k): float(v) for k, v in yearly.items()}
+    # Determine reference years (same shift logic as original extraction)
+    if shifted:
+        latest = max(years_list)
+        ref_ym1_yr, ref_ym2_yr, ref_ym3_yr = latest - 1, latest - 2, latest - 3
+    else:
+        ref_ym1_yr = current_year - 1
+        ref_ym2_yr = current_year - 2
+        ref_ym3_yr = current_year - 3
 
-    # Run AI analysis if available
+    adj_ym1 = float(adjusted_yearly.get(ref_ym1_yr, 0))
+    adj_ym2 = float(adjusted_yearly.get(ref_ym2_yr, 0))
+    adj_ym3 = float(adjusted_yearly.get(ref_ym3_yr, 0))
+
+    # Adaptive base year selection (Problem 1)
+    adj_ytd = float(adjusted_yearly.get(max(years_list), 0)) if years_list else float(ytd)
+    base_year, base_year_method = select_base_year(adj_ym1, adj_ym2, adj_ym3, adj_ytd)
+
+    # Update non_recurring_info with the original base year value for display
+    if non_recurring_info:
+        non_recurring_info['original'] = float(year_minus_1) if year_minus_1 > 0 else float(ytd)
+
+    # Convert yearly data to dict for AI analysis — use adjusted values for trend computation
+    yearly_data_raw = {int(k): float(v) for k, v in yearly.items()}
+    yearly_data_adjusted = {int(k): float(v) for k, v in adjusted_yearly.items()}
+
+    # Run AI analysis on normalized earnings so growth/decay rates reflect true run-rate
     ai_analysis = None
     if AI_AVAILABLE and base_year > 0:
         try:
             ai_analysis = run_full_analysis(
-                yearly_data=yearly_data,
+                yearly_data=yearly_data_adjusted,
                 base_year=base_year,
                 genre=genre,
-                n_simulations=1000
+                n_simulations=1000,
+                listing_price=listing_price
             )
         except Exception as e:
             print(f"AI analysis error: {e}")
@@ -858,7 +1279,6 @@ def process_royalty_file(csv_path, genre="mixed"):
 
     # Generate output filename
     base_name = os.path.basename(csv_path)
-    # Extract listing number if present
     if 'listing' in base_name.lower():
         match = re.search(r'listing[-_]?(\d+)', base_name, re.IGNORECASE)
         if match:
@@ -870,10 +1290,8 @@ def process_royalty_file(csv_path, genre="mixed"):
 
     # Save to "Output Sheets" folder within the tool's directory
     if getattr(sys, 'frozen', False):
-        # Running as compiled .exe
         script_dir = os.path.dirname(sys.executable)
     else:
-        # Running as .py script
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
     output_dir = os.path.join(script_dir, "Output Sheets")
@@ -892,8 +1310,11 @@ def process_royalty_file(csv_path, genre="mixed"):
         base_year=base_year,
         output_path=output_path,
         ai_analysis=ai_analysis,
-        yearly_data=yearly_data,
-        raw_data=df
+        yearly_data=yearly_data_raw,
+        raw_data=df,
+        base_year_method=base_year_method,
+        non_recurring_info=non_recurring_info,
+        listing_price=listing_price
     )
 
     return output_path, royalty_name, yearly, ai_analysis
